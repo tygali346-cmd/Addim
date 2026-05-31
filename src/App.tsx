@@ -59,13 +59,14 @@ import { MapContainer, TileLayer, Marker, Popup, useMap, Tooltip, Polyline, Circ
 import MarkerClusterGroup from 'react-leaflet-cluster';
 import L from 'leaflet';
 import 'leaflet-routing-machine';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, doc, updateDoc, increment, arrayUnion } from 'firebase/firestore';
 import { db } from './lib/firebase';
 import { askGemini } from './geminiService';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AuthModal } from './components/AuthModal';
 import { ProfilePanel } from './components/ProfilePanel';
 import { AccessibilityModal } from './components/AccessibilityModal';
+import { ToastItem, triggerToast } from './lib/toast';
 
 const MAP_LOCATIONS = [
   { id:1,  name:"Bakı Dövlət Universiteti",        addr:"Z.Əliyev küç. 23, Nərimanov",    lat:40.4093, lng:49.8671, features:["rampa","lift","wc"],          rating:4.2, type:"🏛️" },
@@ -144,6 +145,28 @@ function AppContent() {
   });
   
   const { user, profile, is2FAVerified, loading: authLoading } = useAuth();
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+
+  useEffect(() => {
+    const handleToastEvent = (e: Event) => {
+      const customEvent = e as CustomEvent<{ message: string; type: 'success' | 'mission' | 'badge' | 'info'; title?: string }>;
+      const { message, type, title } = customEvent.detail;
+      const newToast: ToastItem = {
+        id: Math.random().toString(36).substring(2, 9),
+        message,
+        type,
+        title
+      };
+      // Keep only up to 2 active toasts to look extremely clean and avoid clutter
+      setToasts(prev => [...prev.slice(-1), newToast]);
+      setTimeout(() => {
+        setToasts(prev => prev.filter(t => t.id !== newToast.id));
+      }, 4500);
+    };
+
+    window.addEventListener('addim-toast', handleToastEvent);
+    return () => window.removeEventListener('addim-toast', handleToastEvent);
+  }, []);
 
   useEffect(() => {
     if (user && profile?.is2FAEnabled && !is2FAVerified) {
@@ -474,6 +497,46 @@ function AppContent() {
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* Global Toast Stack */}
+        <div className="fixed bottom-6 right-6 z-[9999] flex flex-col gap-3 max-w-sm w-full px-4 md:px-0 pointer-events-auto">
+          <AnimatePresence>
+            {toasts.map((toast) => {
+              const colors = {
+                success: { bg: 'from-[#0f172a] to-teal-950/40 border-teal/40 text-teal', icon: '📍', titleColor: 'text-teal' },
+                mission: { bg: 'from-[#0f172a] to-orange-950/40 border-orange/40 text-orange', icon: '🎯', titleColor: 'text-orange' },
+                badge: { bg: 'from-[#0f172a] to-yellow-950/40 border-yellow/40 text-yellow', icon: '🏆', titleColor: 'text-yellow' },
+                info: { bg: 'from-[#0f172a] to-sky-950/40 border-sky/40 text-sky', icon: 'ℹ️', titleColor: 'text-sky' }
+              }[toast.type] || { bg: 'from-[#0f172a] to-teal-950/40 border-teal/40 text-teal', icon: '📍', titleColor: 'text-teal' };
+
+              return (
+                <motion.div
+                  key={toast.id}
+                  initial={{ opacity: 0, x: 50, y: 10, scale: 0.95 }}
+                  animate={{ opacity: 1, x: 0, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, x: 50, scale: 0.9, transition: { duration: 0.2 } }}
+                  layout
+                  className={`p-4 bg-gradient-to-r ${colors.bg} rounded-2xl border backdrop-blur-xl shadow-2xl flex items-start gap-3 relative overflow-hidden group`}
+                >
+                  <div className={`absolute top-0 bottom-0 left-0 w-1 bg-current`} />
+                  <div className="text-2xl mt-0.5 shrink-0 group-hover:scale-110 transition-transform">{colors.icon}</div>
+                  <div className="flex-1 min-w-0">
+                    <h4 className={`text-[10px] font-black uppercase tracking-widest leading-none mb-1.5 ${colors.titleColor}`}>
+                      {toast.title || "Yenilik"}
+                    </h4>
+                    <p className="text-xs font-bold text-white leading-relaxed">{toast.message}</p>
+                  </div>
+                  <button
+                    onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))}
+                    className="text-white/40 hover:text-white transition-colors shrink-0 p-1"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
+        </div>
       </main>
 
       {/* Visual Footer Decor */}
@@ -602,6 +665,8 @@ function MapPanel() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedLoc, setSelectedLoc] = useState<any>(null);
   const [showNotif, setShowNotif] = useState(false);
+  const [notifText, setNotifText] = useState("Məlumat Təsdiqləndi");
+  const { user, profile, refreshProfile } = useAuth();
   
   // Local storage for map locations and verifications
   const [mapLocations, setMapLocations] = useState(() => {
@@ -669,7 +734,8 @@ function MapPanel() {
     setSelectedLoc(loc);
   };
 
-  const handleVerify = (locId: number, feature: string) => {
+  const handleVerify = async (locId: number, feature: string) => {
+    // Increment local verifications state for temporary map pin UI increment
     setVerifications(prev => ({
       ...prev,
       [locId]: {
@@ -677,8 +743,75 @@ function MapPanel() {
         [feature]: (prev[locId]?.[feature] || 0) + 1
       }
     }));
+
+    const addXp = 30;
+    let finalMsg = "Təşəkkür edirik! +30 XP qazandınız.";
+
+    if (user) {
+      try {
+        const userRef = doc(db, 'users', user.uid);
+        const currentXp = profile?.xp || 0;
+        const currentVerifiedCount = (profile?.verifiedCount || 0) + 1;
+        const earnedBadges = [...(profile?.badges || [])];
+
+        // First verification badge
+        if (!earnedBadges.includes('first_verify')) {
+          earnedBadges.push('first_verify');
+          finalMsg = "İlk Bələdçi nişanı qazanıldı! 🔍 +30 XP";
+        }
+
+        // Defender badge if verified count >= 3
+        if (currentVerifiedCount >= 3 && !earnedBadges.includes('defender')) {
+          earnedBadges.push('defender');
+          finalMsg = "Müdafiəçi nişanı qazanıldı! 🛡️ +30 XP";
+        }
+
+        // Master badge if verified count >= 8
+        if (currentVerifiedCount >= 8 && !earnedBadges.includes('master')) {
+          earnedBadges.push('master');
+          finalMsg = "Ustad Könüllü nişanı qazanıldı! 👑 +30 XP";
+        }
+
+        await updateDoc(userRef, {
+          xp: currentXp + addXp,
+          verifiedCount: currentVerifiedCount,
+          badges: earnedBadges
+        });
+        await refreshProfile();
+      } catch (err) {
+        console.error("Firestore verification points update failed:", err);
+      }
+    } else {
+      // Local storage fallback for guest mode / testing
+      try {
+        const stored = localStorage.getItem('accessbaku_local_volunteer_stats');
+        const parsed = stored ? JSON.parse(stored) : { xp: 0, badges: [], verifiedCount: 0, completedMissions: [] };
+
+        parsed.xp += addXp;
+        parsed.verifiedCount += 1;
+
+        if (!parsed.badges.includes('first_verify')) {
+          parsed.badges.push('first_verify');
+          finalMsg = "İlk Bələdçi nişanı qazanıldı! 🔍 +30 XP";
+        }
+        if (parsed.verifiedCount >= 3 && !parsed.badges.includes('defender')) {
+          parsed.badges.push('defender');
+          finalMsg = "Müdafiəçi nişanı qazanıldı! 🛡️ +30 XP";
+        }
+        if (parsed.verifiedCount >= 8 && !parsed.badges.includes('master')) {
+          parsed.badges.push('master');
+          finalMsg = "Ustad Könüllü nişanı qazanıldı! 👑 +30 XP";
+        }
+
+        localStorage.setItem('accessbaku_local_volunteer_stats', JSON.stringify(parsed));
+      } catch (err) {
+        console.error("Local storage verification points error:", err);
+      }
+    }
+
+    setNotifText(finalMsg);
     setShowNotif(true);
-    setTimeout(() => setShowNotif(false), 2000);
+    setTimeout(() => setShowNotif(false), 2500);
   };
 
   const visibleLocations = mapLocations.filter((loc: any) => {
@@ -716,9 +849,9 @@ function MapPanel() {
             initial={{ opacity: 0, y: -20, x: '-50%' }}
             animate={{ opacity: 1, y: 0, x: '-50%' }}
             exit={{ opacity: 0, y: -20, x: '-50%' }}
-            className="fixed top-8 left-1/2 z-[9999] bg-teal text-navy px-6 py-3 rounded-full shadow-2xl font-black text-xs uppercase tracking-widest flex items-center gap-3"
+            className="fixed top-8 left-1/2 z-[9999] bg-gradient-to-r from-teal to-orange text-navy px-6 py-3.5 rounded-full shadow-2xl font-black text-[10px] uppercase tracking-wider flex items-center gap-3 border border-teal/20"
           >
-            <CheckCircle2 className="w-5 h-5" /> Məlumat Təsdiqləndi
+            <CheckCircle2 className="w-4 h-4 shrink-0" /> {notifText}
           </motion.div>
         )}
       </AnimatePresence>
@@ -1453,6 +1586,7 @@ function VolunteerPanel() {
 function VolunteerQuest({ onClose }: { onClose: () => void }) {
   const [step, setStep] = useState(0);
   const [answers, setAnswers] = useState<any>({});
+  const { user, profile, refreshProfile } = useAuth();
 
   const questions = [
     {
@@ -1484,6 +1618,38 @@ function VolunteerQuest({ onClose }: { onClose: () => void }) {
     }
   ];
 
+  useEffect(() => {
+    if (step === questions.length) {
+      const addXp = 100;
+      if (user) {
+        const userRef = doc(db, 'users', user.uid);
+        const currentXp = profile?.xp || 0;
+        const currentBadges = [...(profile?.badges || [])];
+        if (!currentBadges.includes('onboarding')) {
+          currentBadges.push('onboarding');
+        }
+        updateDoc(userRef, {
+          xp: currentXp + addXp,
+          badges: currentBadges,
+          isVolunteer: true
+        }).then(() => refreshProfile()).catch(err => console.error(err));
+      } else {
+        try {
+          const stored = localStorage.getItem('accessbaku_local_volunteer_stats');
+          const parsed = stored ? JSON.parse(stored) : { xp: 0, badges: [], verifiedCount: 0, completedMissions: [] };
+          parsed.xp += addXp;
+          parsed.isVolunteer = true;
+          if (!parsed.badges.includes('onboarding')) {
+            parsed.badges.push('onboarding');
+          }
+          localStorage.setItem('accessbaku_local_volunteer_stats', JSON.stringify(parsed));
+        } catch (err) {
+          console.error(err);
+        }
+      }
+    }
+  }, [step, user, profile, questions.length]);
+
   const benefits = [
     { title: 'Beynəlxalq Sertifikat', icon: '📜' },
     { title: 'Peşəkar Təlimlər', icon: '🎓' },
@@ -1505,37 +1671,37 @@ function VolunteerQuest({ onClose }: { onClose: () => void }) {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 z-[1000] bg-navy/95 backdrop-blur-xl flex items-center justify-center p-4 md:p-6"
+      className="fixed inset-0 z-[1000] bg-navy/95 backdrop-blur-xl flex items-center justify-center p-4 md:p-6 overflow-y-auto"
     >
-      <div className="absolute top-4 right-4 md:top-8 md:right-8">
-        <button onClick={onClose} className="w-12 h-12 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 transition-colors">
-          <X className="w-6 h-6 text-white" />
+      <div className="absolute top-3 right-3 md:top-6 md:right-6 z-50">
+        <button onClick={onClose} className="w-10 h-10 md:w-12 md:h-12 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 transition-colors">
+          <X className="w-5 h-5 md:w-6 md:h-6 text-white" />
         </button>
       </div>
 
-      <div className="max-w-4xl w-full">
+      <div className="max-w-4xl w-full my-auto py-4">
         {step < questions.length ? (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-12 items-center">
             {/* Sidebar with search engine vibe */}
-            <div className="lg:col-span-5 space-y-6">
-              <div className="flex items-center gap-3 mb-8">
-                <div className="w-10 h-10 bg-orange rounded-lg flex items-center justify-center text-white"><Search className="w-5 h-5" /></div>
-                <h3 className="font-exo font-black text-xl text-white uppercase tracking-tighter">VOLUNTEER<span className="text-orange">QUEST</span></h3>
+            <div className="lg:col-span-5 space-y-4 lg:space-y-6">
+              <div className="flex items-center gap-3 mb-2 lg:mb-8">
+                <div className="w-9 h-9 bg-orange rounded-lg flex items-center justify-center text-white"><Search className="w-4.5 h-4.5" /></div>
+                <h3 className="font-exo font-black text-lg lg:text-xl text-white uppercase tracking-tighter">VOLUNTEER<span className="text-orange">QUEST</span></h3>
               </div>
               
-              <div className="space-y-4">
-                 <div className="label-xs text-orange">ÜSTÜNLÜKLƏRİNİZ:</div>
-                 <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2 lg:space-y-4">
+                 <div className="text-[9px] lg:text-[10px] font-black tracking-widest text-orange uppercase">ÜSTÜNLÜKLƏRİNİZ:</div>
+                 <div className="flex md:grid md:grid-cols-2 gap-2 overflow-x-auto pb-2 md:pb-0 scrollbar-none">
                     {benefits.map((b, i) => (
-                      <div key={i} className="p-3 bg-white/5 rounded-xl border border-white/5 flex items-center gap-2">
-                        <span className="text-lg">{b.icon}</span>
-                        <span className="text-[10px] font-bold text-white-soft uppercase">{b.title}</span>
+                      <div key={i} className="p-2 bg-white/5 rounded-xl border border-white/5 flex items-center gap-2 shrink-0 md:shrink">
+                        <span className="text-sm shrink-0">{b.icon}</span>
+                        <span className="text-[9px] lg:text-[10px] font-black text-white-soft uppercase leading-none tracking-wide">{b.title}</span>
                       </div>
                     ))}
                  </div>
               </div>
 
-              <div className="p-6 bg-orange/10 border border-orange/20 rounded-2xl hidden lg:block">
+              <div className="p-4 bg-orange/10 border border-orange/20 rounded-2xl hidden lg:block">
                  <p className="text-xs italic text-orange-light leading-relaxed">
                    "Könüllülük sadəcə kömək etmək deyil, həm də dünyaya yeni bir gözlə baxmaqdır."
                  </p>
@@ -1548,28 +1714,28 @@ function VolunteerQuest({ onClose }: { onClose: () => void }) {
                 key={step}
                 initial={{ x: 50, opacity: 0 }}
                 animate={{ x: 0, opacity: 1 }}
-                className="space-y-8"
+                className="space-y-4 lg:space-y-6"
               >
-                <div className="flex items-center gap-4 text-orange mb-4">
-                   <div className="text-4xl font-black opacity-20">0{step + 1}</div>
+                <div className="flex items-center gap-4 text-orange mb-2">
+                   <div className="text-2xl lg:text-3xl font-black opacity-20">0{step + 1}</div>
                    <div className="h-0.5 flex-grow bg-orange/20"></div>
                 </div>
-                <h2 className="font-exo font-bold text-2xl md:text-3xl text-white leading-tight">
+                <h2 className="font-exo font-bold text-base md:text-xl text-white leading-snug line-clamp-2">
                   {questions[step].q}
                 </h2>
-                <div className="space-y-3">
+                <div className="space-y-2 max-h-[290px] md:max-h-none overflow-y-auto pr-1">
                   {questions[step].options.map((opt, i) => (
                     <button 
                       key={i}
                       onClick={() => handleNext(opt.val)}
-                      className="w-full p-6 bg-white/5 border border-white/5 rounded-[1.5rem] flex items-center gap-5 hover:bg-orange/10 hover:border-orange/30 group transition-all text-left"
+                      className="w-full p-3 md:p-4 bg-white/5 border border-white/5 rounded-2xl flex items-center gap-3 hover:bg-orange/10 hover:border-orange/30 group transition-all text-left"
                     >
-                      <div className="w-14 h-14 bg-white/5 rounded-xl flex items-center justify-center text-2xl group-hover:scale-110 transition-transform">{opt.icon}</div>
-                      <div className="flex-1">
-                        <div className="text-sm font-bold text-white group-hover:text-orange transition-colors">{opt.text}</div>
-                        <div className="text-[10px] text-muted-blue mt-1 uppercase tracking-widest">Seçmək üçün toxun</div>
+                      <div className="w-10 h-10 bg-white/5 rounded-xl flex items-center justify-center text-xl shrink-0 group-hover:scale-105 transition-transform">{opt.icon}</div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-black text-white group-hover:text-orange transition-colors truncate">{opt.text}</div>
+                        <div className="text-[8px] md:text-[9px] text-muted-blue mt-0.5 uppercase tracking-widest leading-none">Seçmək üçün toxun</div>
                       </div>
-                      <ChevronRight className="w-5 h-5 text-muted-blue group-hover:text-orange" />
+                      <ChevronRight className="w-4 h-4 text-muted-blue shrink-0 group-hover:text-orange" />
                     </button>
                   ))}
                 </div>
@@ -1600,12 +1766,172 @@ function VolunteerQuest({ onClose }: { onClose: () => void }) {
 }
 
 function JobsPanel() {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedType, setSelectedType] = useState("all");
+  const [maxDistance, setMaxDistance] = useState(999);
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  const [selectedJob, setSelectedJob] = useState<any>(null);
+
   const jobs = [
-    { title: 'Frontend Developer (Remote)', company: 'AzDoc Solutions', type: 'Tam Ştat', color: 'teal' },
-    { title: 'Müştəri Xidmətləri Təmsilçisi', company: 'Pasha Bank', type: 'Hibrid', color: 'orange' },
-    { title: 'Data Analitik', company: 'Global Tech', type: 'Freelance', color: 'teal' },
-    { title: 'Qrafik Dizayner', company: 'Creative Studio', type: 'Tam Ştat', color: 'orange' },
+    { 
+      id: 1,
+      title: 'Frontend Developer (React)', 
+      company: 'AzDoc Solutions', 
+      type: 'Məsafəli', 
+      distance: 0, 
+      skills: ['React', 'JavaScript', 'Dizayn'],
+      salary: '1200 - 1800 AZN',
+      color: 'teal',
+      desc: 'Əlil arabası və digər fiziki məhdudiyyətləri olan şəxslər üçün tam uzaqdan (məsafəli) iş imkanı. React və müasir interfeys texnologiyaları üzrə biliklər tələb olunur.',
+      benefits: ['100% Məsafəli iş', 'Sərbəst qrafik', 'Avadanlıq dəstəyi'],
+      accessibility: ['Evdən iş', 'Səsli zəngsiz']
+    },
+    { 
+      id: 2,
+      title: 'Müştəri Xidmətləri Təmsilçisi', 
+      company: 'Pasha Bank', 
+      type: 'Hibrid', 
+      distance: 4, 
+      skills: ['Müştəri xidmətləri', 'Ünsiyyət'],
+      salary: '600 - 800 AZN',
+      color: 'orange',
+      desc: 'Həftədə 2 gün ofis, 3 gün uzaqdan işləmək imkanı. Ofisimiz Port Baku yaxınlığında yerləşir, tam əlçatımlıdır (rampa, adaptiv lift və geniş keçidlər mövcuddur).',
+      benefits: ['Sağlamlıq sığortası', 'Metropolitenə yaxın coğrafiya', 'Fərdi mentor dəstəyi'],
+      accessibility: ['Rampalı bina', 'Lift', 'Xüsusi sanitar qovşaq']
+    },
+    { 
+      id: 3,
+      title: 'Data Analitik', 
+      company: 'Global Tech', 
+      type: 'Məsafəli', 
+      distance: 0, 
+      skills: ['Excel', 'SQL'],
+      salary: '1000 - 1500 AZN',
+      color: 'teal',
+      desc: 'Böyük data massivləri ilə iş və hesabatların hazırlanması. Eşitmə və ya hərəkət məhdudiyyəti olan namizədlər üçün tam uzaqdan qoşulma üstünlükləri.',
+      benefits: ['Biznes təlimlər', 'Sərbəst iş saatları', 'Noutbuk təminatı'],
+      accessibility: ['Evdən iş', 'Yazılı kommunikasiya']
+    },
+    { 
+      id: 4,
+      title: 'Qrafik Dizayner', 
+      company: 'Creative Space', 
+      type: 'Ofis', 
+      distance: 12, 
+      skills: ['Dizayn', 'Photoshop'],
+      salary: '800 - 1200 AZN',
+      color: 'orange',
+      desc: 'Şirkət ofisində kreativ dizaynların yerinə yetirilməsi. Ofisimiz Bakı Dövlət Universiteti yaxınlığındadır, əlilliyi olan şəxslər üçün xüsusi sanitar qovşaq və lift xidmətinə malikdir.',
+      benefits: ['Yüksək performanslı PC', 'Nahor şirkətdən', 'Ödənişli kurslar'],
+      accessibility: ['Rampalı giriş', 'Adaptiv qapılar']
+    },
+    { 
+      id: 5,
+      title: 'Kopyrayter & SMM Menecer', 
+      company: 'Baku Media Group', 
+      type: 'Məsafəli', 
+      distance: 0, 
+      skills: ['Sosial Media', 'Ünsiyyət'],
+      salary: '500 - 700 AZN',
+      color: 'teal',
+      desc: 'Sosial media profillərinin idarə olunması. İş saatları tamamilə sərbəstdir və evdən rahat idarə edilə bilər. Qayğıkeş icma və onlayn komanda rəhbərliyi.',
+      benefits: ['Onlayn fitnes', 'Ay sonu bonusları', 'Limitsiz internet'],
+      accessibility: ['Evdən iş', 'Sərbəst cədvəl']
+    },
+    { 
+      id: 6,
+      title: 'Maliyyə Köməkçisi', 
+      company: 'Kapital Bank', 
+      type: 'Ofis', 
+      distance: 3, 
+      skills: ['Excel', 'Finans'],
+      salary: '700 - 900 AZN',
+      color: 'orange',
+      desc: 'İlkin maliyyə sənədlərinin Excel cədvəllərinə daxil edilməsi. Ofis Nərimanov rayonunda, metroya cəmi 50 metr məsafədə və ideal şəkildə təchiz edilmiş rampalı binadadır.',
+      benefits: ['Tibbi sığorta', 'Məkanın metrosaniyaya yaxınlığı (50m)', 'Xüsusi parkinq'],
+      accessibility: ['Rampa', 'Geniş lift', 'Səsli bildiriş sistemi']
+    },
+    { 
+      id: 7,
+      title: 'IT Texniki Dəstək Operatoru', 
+      company: 'CyberNet', 
+      type: 'Hibrid', 
+      distance: 18, 
+      skills: ['Texniki dəstək', 'SQL'],
+      salary: '800 - 1000 AZN',
+      color: 'teal',
+      desc: 'Müştərilərin texniki suallarının onlayn şəkildə cavablandırılması və sistem problemlərinin həlli. Həftədə cəmi 1 gün planlaşdırma görüşü üçün ofisə gəliş.',
+      benefits: ['Sertifikasiya sığortası', 'Daimi onlayn dəstək', 'İnkişaf imkanları'],
+      accessibility: ['Məsafəli günlər', 'Səsli dəstək avadanlığı']
+    },
+    { 
+      id: 8,
+      title: 'Xarici Dil Tərcüməçisi (İngilis dili)', 
+      company: 'TransLink Azerbaijan', 
+      type: 'Məsafəli', 
+      distance: 0, 
+      skills: ['İngilis dili', 'Tərcümə'],
+      salary: '900 - 1300 AZN',
+      color: 'orange',
+      desc: 'Hüquqi və bədii mətnlərin İngilis dilindən Azərbaycan dilinə tərcüməsi. Audio zəng tələb olunmur, tamamilə mətnyönümlüdür. Eşitmə məhdudiyyətli şəxslər üçün xüsusilə əlverişlidir.',
+      benefits: ['Hər tərcüməyə görə bonus', 'Geniş onlayn kitabxana', 'Yenilikçi proqram rəhbərliyi'],
+      accessibility: ['Mətnyönümlü', '100% Onlayn']
+    },
+    { 
+      id: 9,
+      title: 'HR Koordinator', 
+      company: 'Velo Services', 
+      type: 'Ofis', 
+      distance: 25, 
+      skills: ['HR', 'Ünsiyyət'],
+      salary: '700 - 1100 AZN',
+      color: 'teal',
+      desc: 'Namizədlərlə ilkin onlayn müsahibələrin təşkili və CV-lərin qeydiyyatı. Ofisimiz lift, geniş koridorlar, xüsusi sanitar qovşaq və əlçatımlı parkinq ilə tam təchiz olunub.',
+      benefits: ['Sürətli CV verilənlər bazası', 'İllik sığorta paketi', 'Geniş ofis yeməkxanası'],
+      accessibility: ['Lift', 'Əlçatımlı sanitar qovşaq', 'Rampalı giriş']
+    }
   ];
+
+  // Extract all unique skills across all jobs
+  const allSkills = Array.from(new Set(jobs.flatMap(j => j.skills)));
+
+  // Filter logic
+  const filteredJobs = jobs.filter(job => {
+    // 1. Text Search MATCH
+    const matchesSearch = job.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                          job.company.toLowerCase().includes(searchQuery.toLowerCase());
+    
+    // 2. Workplace Type MATCH
+    const matchesType = selectedType === 'all' || job.type === selectedType;
+    
+    // 3. Distance Match
+    const matchesDistance = maxDistance === 999 || 
+                            job.type === 'Məsafəli' || 
+                            job.distance <= maxDistance;
+    
+    // 4. Skills Match (Must possess any of the selected filters)
+    const matchesSkills = selectedSkills.length === 0 || 
+                          selectedSkills.some(skill => job.skills.includes(skill));
+
+    return matchesSearch && matchesType && matchesDistance && matchesSkills;
+  });
+
+  const handleSkillToggle = (skill: string) => {
+    if (selectedSkills.includes(skill)) {
+      setSelectedSkills(prev => prev.filter(s => s !== skill));
+    } else {
+      setSelectedSkills(prev => [...prev, skill]);
+    }
+  };
+
+  const handleApply = (job: any) => {
+    triggerToast(
+      `Müraciətiniz müvəffəqiyyətlə qəbul edildi! ${job.company} qısa zamanda sizinlə əlaqə saxlayacaq.`, 
+      "success", 
+      "Uğurlu Müraciət"
+    );
+    setSelectedJob(null);
+  };
 
   return (
     <motion.div 
@@ -1614,34 +1940,313 @@ function JobsPanel() {
       className="space-y-6"
     >
       <SectionHeader 
-        title="Əmək Bazarı" 
+        title="Vakansiyalar və İş İmkanları" 
         badge="İŞ" 
-        desc="Məhdudiyyətsiz imkanlar. Sizin bacarıqlarınız bizim prioritetimizdir."
+        desc="Sosial inteqrasiya və iqtisadi müstəqilliyiniz üçün əlçatımlı müəssisələrin təklif etdiyi aktiv iş elanları."
       />
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {jobs.map((j, i) => (
-          <div key={i} className="card group hover:border-orange/40 transition-all cursor-pointer">
-            <div className="flex justify-between items-start mb-4">
-              <div className={`p-3 rounded-xl bg-${j.color}/10 text-${j.color}`}>
-                <Briefcase className="w-5 h-5" />
-              </div>
-              <span className="text-[10px] font-black px-2 py-0.5 rounded bg-white/5 text-muted-blue border border-white/10 uppercase tracking-widest">
-                {j.type}
-              </span>
+
+      {/* Advanced Filter Box */}
+      <div className="card border border-teal/15 p-6 bg-navy-light/30">
+        <div className="flex flex-col gap-6">
+          {/* Row 1: Search & Reset */}
+          <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
+            <div className="relative w-full md:flex-1">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-blue" />
+              <input
+                type="text"
+                placeholder="Vakansiya adı və ya şirket üzrə axtarış..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full bg-navy/60 border border-white/10 rounded-xl pl-11 pr-4 py-3 text-xs font-bold text-white placeholder-navy-light focus:outline-none focus:ring-1 focus:ring-teal/50"
+              />
             </div>
-            <h4 className="font-exo font-bold text-lg mb-1 group-hover:text-orange-light transition-colors">{j.title}</h4>
-            <p className="text-sm text-muted-blue mb-4">{j.company}</p>
-            <div className="flex items-center gap-2 text-xs text-orange font-bold pt-4 border-t border-white/5">
-              İndi müraciət et <ArrowUpRight className="w-3.5 h-3.5" />
+            {(selectedType !== 'all' || maxDistance !== 999 || selectedSkills.length > 0 || searchQuery !== '') && (
+              <button
+                onClick={() => {
+                  setSearchQuery('');
+                  setSelectedType('all');
+                  setMaxDistance(999);
+                  setSelectedSkills([]);
+                }}
+                className="px-4 py-3 bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-black uppercase tracking-widest text-center rounded-xl text-muted-blue hover:text-white transition-colors shrink-0 cursor-pointer"
+              >
+                Filtrləri təmizlə
+              </button>
+            )}
+          </div>
+
+          {/* Row 2: Type, Distance & Skills layout */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-white/5">
+            {/* Filter by Type */}
+            <div className="space-y-2">
+              <span className="text-[9px] font-black tracking-widest uppercase text-teal">İş Növü</span>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { value: 'all', label: 'Hamısı' },
+                  { value: 'Məsafəli', label: 'Məsafəli' },
+                  { value: 'Ofis', label: 'Ofis' },
+                  { value: 'Hibrid', label: 'Hibrid' }
+                ].map(item => (
+                  <button
+                    key={item.value}
+                    onClick={() => setSelectedType(item.value)}
+                    className={`px-3 py-2 text-[10px] uppercase font-black tracking-wider rounded-lg transition-all cursor-pointer ${
+                      selectedType === item.value 
+                        ? 'bg-teal text-navy shadow-lg shadow-teal/15 font-black' 
+                        : 'bg-white/5 border border-white/5 text-muted-blue hover:text-white hover:bg-white/10'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Filter by Distance */}
+            <div className="space-y-2">
+              <span className="text-[9px] font-black tracking-widest uppercase text-orange">Məsafə (Ofis/Hibrid üçün)</span>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { value: 999, label: 'Bütün Məsafələr' },
+                  { value: 5, label: '< 5 km' },
+                  { value: 15, label: '< 15 km' },
+                  { value: 30, label: '< 30 km' }
+                ].map(item => (
+                  <button
+                    key={item.value}
+                    onClick={() => setMaxDistance(item.value)}
+                    className={`px-3 py-2 text-[10px] uppercase font-black tracking-wider rounded-lg transition-all cursor-pointer ${
+                      maxDistance === item.value 
+                        ? 'bg-orange text-navy shadow-lg shadow-orange/15 font-black' 
+                        : 'bg-white/5 border border-white/5 text-muted-blue hover:text-white hover:bg-white/10'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Row 3: Skills Filter Board */}
+          <div className="space-y-2 pt-4 border-t border-white/5">
+            <span className="text-[9px] font-black tracking-widest uppercase text-white-soft">Bacarıqlara Görə süzgəc:</span>
+            <div className="flex flex-wrap gap-1.5 max-h-[120px] overflow-y-auto pr-1">
+              {allSkills.map(skill => {
+                const isSelected = selectedSkills.includes(skill);
+                return (
+                  <button
+                    key={skill}
+                    onClick={() => handleSkillToggle(skill)}
+                    className={`px-2.5 py-1 text-[9px] font-black uppercase tracking-wider rounded-md border transition-all cursor-pointer ${
+                      isSelected 
+                        ? 'bg-orange/20 border-orange text-orange font-black' 
+                        : 'bg-navy/40 border-white/5 text-muted-blue hover:border-white/20 hover:text-white'
+                    }`}
+                  >
+                    {skill} {isSelected && '✓'}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Count Indicator */}
+      <div className="flex justify-between items-center text-xs font-bold text-muted-blue uppercase tracking-widest px-1">
+        <span>Axtarışa uyğun: <span className="font-exo font-black text-teal text-sm">{filteredJobs.length} vakansiya</span></span>
+        {filteredJobs.length === 0 && <span className="text-orange text-[10px] animate-pulse">Süzgəcləri təmizləməyi sınayın</span>}
+      </div>
+
+      {/* Grid of Jobs */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {filteredJobs.map((j) => (
+          <div 
+            key={j.id} 
+            onClick={() => setSelectedJob(j)}
+            className="job-card card group hover:border-orange-500/30 bg-navy-light/10 hover:bg-navy-light/30 transition-all cursor-pointer flex flex-col justify-between relative overflow-hidden rounded-3xl border border-white/5 shadow-lg shadow-black/20 hover:scale-[1.02] active:scale-[0.99]"
+          >
+            {/* Subtle glow highlight on top right corner */}
+            <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-white/5 to-transparent rounded-bl-full pointer-events-none opacity-50 group-hover:opacity-100 transition-opacity" />
+            
+            <div className="p-5 md:p-6 pb-2">
+              <div className="flex justify-between items-start mb-4 gap-2">
+                <div className={`p-2.5 rounded-xl bg-white/5 text-teal border border-white/10 flex items-center justify-center shrink-0 group-hover:text-orange group-hover:bg-orange/10 group-hover:border-orange/20 transition-all`}>
+                  <Briefcase className="w-5 h-5 transition-transform group-hover:scale-110" />
+                </div>
+                <div className="flex flex-col items-end gap-1.5 shrink-0">
+                  {j.type === 'Məsafəli' ? (
+                    <span className="text-[9px] font-black px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 uppercase tracking-wider leading-none flex items-center gap-1.5 shadow-sm shadow-emerald-500/5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                      Məsafəli
+                    </span>
+                  ) : j.type === 'Ofis' ? (
+                    <span className="text-[9px] font-black px-2.5 py-1 rounded-lg bg-orange/10 text-orange-light border border-orange/25 uppercase tracking-wider leading-none flex items-center gap-1.5 shadow-sm shadow-orange/5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-orange-500 shrink-0" />
+                      Ofis
+                    </span>
+                  ) : (
+                    <span className="text-[9px] font-black px-2.5 py-1 rounded-lg bg-sky-500/10 text-sky-400 border border-sky-500/25 uppercase tracking-wider leading-none flex items-center gap-1.5 shadow-sm shadow-sky-500/5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-sky-400 shrink-0" />
+                      Hibrid
+                    </span>
+                  )}
+                  {j.type !== 'Məsafəli' && (
+                    <span className="text-[8px] font-black text-rose-400/80 uppercase tracking-widest bg-rose-500/5 border border-rose-500/10 px-1.5 py-0.5 rounded-md">
+                      📍 {j.distance} km
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <h4 className="font-exo font-black text-base md:text-lg mb-1 group-hover:text-orange-light transition-colors leading-snug">{j.title}</h4>
+              <p className="text-[10px] text-muted-blue uppercase tracking-widest mb-3 font-extrabold flex items-center gap-1">
+                <span className="w-1 h-1 rounded-full bg-teal" />
+                {j.company}
+              </p>
+              
+              <p className="text-xs text-white-soft leading-relaxed line-clamp-3 mb-4 font-medium opacity-90">{j.desc}</p>
+              
+              {/* Job Skills Tags */}
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {j.skills.map(s => (
+                  <span key={s} className="px-2.5 py-1 rounded-lg bg-white/5 border border-white/5 text-[8px] text-muted-blue uppercase font-bold group-hover:border-white/10 transition-colors">
+                    {s}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div className="p-5 md:p-6 pt-3 flex justify-between items-center text-xs font-bold border-t border-white/5 mt-auto">
+              <div className="flex flex-col">
+                <span className="text-[8px] uppercase tracking-widest text-muted-blue leading-none mb-1">Əmək haqqı</span>
+                <span className="text-teal font-black text-[12px] font-exo tracking-tight">{j.salary}</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-orange font-black text-[10px] uppercase tracking-wider group-hover:translate-x-1.5 transition-transform">
+                Ətraflı Bax <ArrowUpRight className="w-4 h-4" />
+              </div>
             </div>
           </div>
         ))}
-        <div className="card border-dashed border-teal/30 bg-teal/5 flex flex-col items-center justify-center text-center p-8">
-          <Search className="w-8 h-8 text-teal mb-3 opacity-50" />
-          <div className="font-exo font-bold text-sm text-teal">Digər vakansiyalar</div>
-          <div className="text-[10px] text-muted-blue uppercase mt-1">45+ AKTİV İŞ ELANI</div>
-        </div>
+
+        {filteredJobs.length === 0 && (
+          <div className="col-span-full card border-dashed border-white/10 bg-navy/20 flex flex-col items-center justify-center text-center p-12">
+            <Filter className="w-10 h-10 text-muted-blue mb-3 opacity-30 animate-pulse" />
+            <div className="font-exo font-bold text-base text-white uppercase">Axtarışa uyğun vakansiya tapılmadı</div>
+            <p className="text-xs text-muted-blue max-w-sm mt-2">
+              Seçdiyiniz filtrlərə uyğun heç bir iş elanı tapılmadı. Zəhmət olmasa filtrləri təmizləyin və ya fərqli parametrlərdən istifadə edin.
+            </p>
+            <button
+              onClick={() => {
+                setSearchQuery('');
+                setSelectedType('all');
+                setMaxDistance(999);
+                setSelectedSkills([]);
+              }}
+              className="mt-4 px-5 py-2.5 bg-teal text-navy font-black text-[10px] uppercase tracking-widest rounded-xl transition-all hover:scale-105 active:scale-95"
+            >
+              Bütün elanları göstər
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* Drawer / Modal Detail for applying to Jobs */}
+      <AnimatePresence>
+        {selectedJob && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setSelectedJob(null)}
+            className="fixed inset-0 z-[1100] bg-navy/90 backdrop-blur-xl flex items-center justify-center p-4 overflow-y-auto"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              onClick={e => e.stopPropagation()}
+              className="w-full max-w-xl card relative p-6 md:p-8 space-y-6"
+            >
+              {/* Close button */}
+              <button 
+                onClick={() => setSelectedJob(null)}
+                className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5 text-white" />
+              </button>
+
+              <div className="space-y-1">
+                <span className="text-[10px] font-black px-2.5 py-1 rounded bg-teal/10 text-teal border border-teal/20 uppercase tracking-widest w-fit block">
+                  {selectedJob.type}
+                </span>
+                <h3 className="font-exo font-black text-2xl text-white pt-2 leading-snug">{selectedJob.title}</h3>
+                <p className="text-sm text-orange font-black uppercase tracking-widest">{selectedJob.company}</p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 py-4 border-y border-white/5">
+                <div>
+                  <span className="text-[9px] font-black uppercase tracking-widest text-muted-blue block">Əmək haqqı</span>
+                  <span className="text-sm font-black text-white font-exo">{selectedJob.salary}</span>
+                </div>
+                <div>
+                  <span className="text-[9px] font-black uppercase tracking-widest text-muted-blue block">Sizə olan məsafə</span>
+                  <span className="text-sm font-black text-white">
+                    {selectedJob.type === 'Məsafəli' ? 'Tamamilə Uzaqdan' : `Təxminən ${selectedJob.distance} km`}
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="text-[10px] font-black uppercase tracking-widest text-teal">İşin Təsviri</h4>
+                <p className="text-xs text-white-soft leading-relaxed">{selectedJob.desc}</p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Benefits list */}
+                <div className="space-y-2">
+                  <h4 className="text-[10px] font-black uppercase tracking-widest text-orange">Sosial Təminatlar</h4>
+                  <ul className="space-y-1">
+                    {selectedJob.benefits.map((b: string, idx: number) => (
+                      <li key={idx} className="text-[10px] text-white-soft font-bold flex items-center gap-1.5">
+                        <span className="text-orange">✓</span> {b}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                {/* Accessibility status */}
+                <div className="space-y-2">
+                  <h4 className="text-[10px] font-black uppercase tracking-widest text-teal">Əlçatımlılıq Göstəriciləri</h4>
+                  <ul className="space-y-1">
+                    {selectedJob.accessibility.map((a: string, idx: number) => (
+                      <li key={idx} className="text-[10px] text-teal font-black uppercase tracking-widest flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 bg-teal rounded-full animate-pulse" /> {a}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+
+              <div className="pt-4 flex gap-3">
+                <button 
+                  onClick={() => setSelectedJob(null)}
+                  className="flex-1 py-3.5 bg-white/5 hover:bg-white/10 text-white font-black text-[10px] uppercase tracking-widest rounded-xl transition-all text-center cursor-pointer border border-white/5"
+                >
+                  Bağla
+                </button>
+                <button 
+                  onClick={() => handleApply(selectedJob)}
+                  className="flex-1 py-3.5 bg-orange hover:bg-orange/90 active:scale-95 text-navy font-black text-[10px] uppercase tracking-widest rounded-xl transition-all shadow-lg shadow-orange/20 flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  Müraciət et <ArrowUpRight className="w-4 h-4" />
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }

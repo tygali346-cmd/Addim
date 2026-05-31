@@ -2,5 +2,7 @@
   "name": "ADDIM — Hər kəs üçün",
   "description": "Əlilliyi olan vətəndaşlar üçün rəqəmsal əlçatımlılıq, könüllülük və məşğulluq platforması.",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

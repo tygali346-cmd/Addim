@@ -18,17 +18,17 @@ export function AccessibilityModal({ onClose, settings, setSettings }: Accessibi
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 z-[2000] bg-navy/90 backdrop-blur-xl flex items-center justify-center p-4"
+      className="fixed inset-0 z-[2000] bg-navy/90 backdrop-blur-xl flex items-center justify-center p-0 sm:p-4"
       onClick={onClose}
     >
       <motion.div 
         initial={{ scale: 0.9, y: 20 }}
         animate={{ scale: 1, y: 0 }}
         exit={{ scale: 0.9, y: 20 }}
-        className="w-full max-w-lg card overflow-hidden relative"
+        className="w-full max-w-lg card min-h-screen sm:min-h-0 sm:max-h-[90vh] flex flex-col overflow-hidden relative rounded-none sm:rounded-[2.5rem]"
         onClick={e => e.stopPropagation()}
       >
-        <div className="p-8 border-b border-white/5 bg-gradient-to-br from-teal/10 to-transparent">
+        <div className="p-6 md:p-8 border-b border-white/5 bg-gradient-to-br from-teal/10 to-transparent shrink-0">
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 rounded-xl bg-teal/20 text-teal flex items-center justify-center">
               <Accessibility className="w-6 h-6" />
@@ -38,7 +38,7 @@ export function AccessibilityModal({ onClose, settings, setSettings }: Accessibi
           <p className="text-muted-blue text-sm">Platformanı ehtiyaclarınıza uyğun tənzimləyin.</p>
         </div>
 
-        <div className="p-8 space-y-8">
+        <div className="p-6 md:p-8 space-y-6 md:space-y-8 flex-grow overflow-y-auto">
           {/* Font Size */}
           <div className="space-y-4">
             <label className="text-[10px] font-black text-muted-blue uppercase tracking-widest flex items-center gap-2">
@@ -109,10 +109,10 @@ export function AccessibilityModal({ onClose, settings, setSettings }: Accessibi
           </div>
         </div>
 
-        <div className="p-6 bg-navy-lighter/50 border-t border-white/5 flex gap-4">
+        <div className="p-6 bg-navy border-t border-white/5 flex gap-4 sticky bottom-0 z-10 shrink-0">
           <button 
             onClick={onClose}
-            className="flex-1 py-4 bg-teal text-navy font-black text-xs uppercase tracking-widest rounded-xl hover:scale-[1.02] transition-transform active:scale-95 shadow-lg shadow-teal/20"
+            className="w-full py-4 bg-teal text-navy font-black text-xs uppercase tracking-widest rounded-xl hover:scale-[1.02] transition-transform active:scale-95 shadow-lg shadow-teal/20"
           >
             Tətbiq Et
           </button>
