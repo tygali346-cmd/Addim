@@ -1,0 +1,43 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email']) &&
+             data.uid is string &&
+             data.email is string &&
+             data.uid == request.auth.uid;
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if false; // No direct listing of users for privacy
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && 
+                      request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'bio', 'location', 'role', 'updatedAt']) &&
+                      request.resource.data.uid == resource.data.uid;
+    }
+
+    match /suggested_locations/{suggestionId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && 
+                      request.resource.data.status == 'pending' &&
+                      request.resource.data.suggestedBy == request.auth.uid;
+      allow update, delete: if isSignedIn() && 
+                             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+  }
+}

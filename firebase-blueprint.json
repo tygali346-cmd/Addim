@@ -1,0 +1,46 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "volunteer", "employer", "admin"] },
+        "bio": { "type": "string" },
+        "location": { "type": "string" },
+        "is2FAEnabled": { "type": "boolean" },
+        "twoFactorPIN": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "SuggestedLocation": {
+      "title": "Suggested Location",
+      "description": "A location suggested by a user",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "addr": { "type": "string" },
+        "features": { "type": "array", "items": { "type": "string" } },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "suggestedBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "addr", "features", "suggestedBy", "status"]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": "User",
+      "description": "User profiles indexed by UID"
+    },
+    "suggested_locations/{suggestionId}": {
+      "schema": "SuggestedLocation",
+      "description": "User suggested map locations pending moderation"
+    }
+  }
+}
