@@ -136,6 +136,7 @@ function AppContent() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiResponse, setAiResponse] = useState<string | null>(null);
   const [aiInput, setAiInput] = useState('');
+  const [aiLastQuery, setAiLastQuery] = useState<string | null>(null);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isAccessibilityModalOpen, setIsAccessibilityModalOpen] = useState(false);
   const [accSettings, setAccSettings] = useState({
@@ -216,10 +217,13 @@ function AppContent() {
 
   const handleAskAI = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!aiInput.trim()) return;
+    const queryToSend = aiInput.trim();
+    if (!queryToSend) return;
 
     setAiLoading(true);
+    setAiLastQuery(queryToSend);
     setAiResponse(null);
+    setAiInput('');
     
     const contextMap = {
       overview: "Ümumi layihə haqqında sual.",
@@ -229,7 +233,7 @@ function AppContent() {
       jobs: "Məşğulluq və əmək bazarı haqqında."
     };
 
-    const response = await askGemini(aiInput, contextMap[activePanel as keyof typeof contextMap] || "Ümumi profil sualı.");
+    const response = await askGemini(queryToSend, contextMap[activePanel as keyof typeof contextMap] || "Ümumi profil sualı.");
     setAiResponse(response);
     setAiLoading(false);
   };
@@ -428,22 +432,49 @@ function AppContent() {
                 </div>
 
                 <div className="bg-teal/5 border border-teal/20 rounded-xl p-4 md:p-5 flex flex-col">
-                  <div className="flex items-center gap-2 mb-3">
-                    <span className="w-2 h-2 bg-teal rounded-full animate-pulse"></span>
-                    <span className="text-[10px] font-black text-teal uppercase tracking-widest">ADDIM AI ASSISTANT</span>
+                  <div className="flex items-center justify-between gap-2 mb-3">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 bg-teal rounded-full animate-pulse"></span>
+                      <span className="text-[10px] font-black text-teal uppercase tracking-widest">ADDIM AI KÖMƏKÇİSİ</span>
+                    </div>
+                    {aiLoading && (
+                      <span className="text-[9px] font-bold text-orange uppercase tracking-widest animate-pulse">Cavab hazırlanır...</span>
+                    )}
                   </div>
-                  <div className="text-xs leading-relaxed text-white-soft/80 italic px-2 border-l-2 border-teal/40 mb-4 h-fit md:max-h-[100px] overflow-auto">
-                    {aiResponse || "Salam! Mən sizə yaxınlıqdakı əlçatan məkanları tapmaqda və ya iş tapmaqda kömək edə bilərəm."}
+                  
+                  <div className="text-xs leading-relaxed text-white-soft/80 px-2 border-l-2 border-teal/40 mb-4 h-fit max-h-[160px] overflow-y-auto space-y-2">
+                    {aiLastQuery && (
+                      <div className="text-[10px] font-black text-teal/60 uppercase tracking-widest mb-1.5">
+                        Sualınız: <span className="text-white-soft italic normal-case font-medium font-sans">"{aiLastQuery}"</span>
+                      </div>
+                    )}
+                    
+                    {aiLoading ? (
+                      <div className="flex items-center gap-2 text-teal font-black text-[11px] animate-pulse py-1">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Süni İntellekt düşünür... Zəhmət olmasa gözləyin.</span>
+                      </div>
+                    ) : (
+                      <p className="italic">
+                        {aiResponse || "Salam! Mən sizə əlçatımlı məkanlar, dövlət bələdçiləri, könüllülük proqramı və ya vakansiyalar barədə suallarınızı cavablandıra bilərəm."}
+                      </p>
+                    )}
                   </div>
+                  
                   <form onSubmit={handleAskAI} className="flex gap-2">
                     <input 
                       type="text" 
                       value={aiInput}
                       onChange={(e) => setAiInput(e.target.value)}
-                      placeholder="Sualınızı bura yazın..." 
-                      className="flex-grow bg-navy border border-teal/20 rounded-lg px-4 py-2 text-xs focus:outline-none focus:border-teal min-w-0" 
+                      disabled={aiLoading}
+                      placeholder={aiLoading ? "Süni İntellekt düşünür..." : "Sualınızı bura yazın..."} 
+                      className="flex-grow bg-navy border border-teal/20 rounded-lg px-4 py-2 text-xs focus:outline-none focus:border-teal min-w-0 disabled:opacity-50" 
                     />
-                    <button type="submit" className="p-2 bg-teal text-navy rounded-lg hover:scale-105 transition-transform shrink-0">
+                    <button 
+                      type="submit" 
+                      disabled={aiLoading || !aiInput.trim()}
+                      className="p-2 bg-teal text-navy rounded-lg hover:scale-105 active:scale-95 transition-all shrink-0 cursor-pointer disabled:opacity-30 disabled:hover:scale-100"
+                    >
                       {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                     </button>
                   </form>
