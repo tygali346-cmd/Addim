@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   MapPin, 
   BookOpen, 
@@ -52,14 +52,21 @@ import {
   Settings as SettingsIcon,
   Eye,
   Keyboard,
-  Mic
+  Mic,
+  Star,
+  MessageSquare,
+  Volume2,
+  VolumeX,
+  Phone,
+  PhoneOff,
+  Headphones
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { MapContainer, TileLayer, Marker, Popup, useMap, Tooltip, Polyline, CircleMarker } from 'react-leaflet';
 import MarkerClusterGroup from 'react-leaflet-cluster';
 import L from 'leaflet';
 import 'leaflet-routing-machine';
-import { collection, addDoc, serverTimestamp, doc, updateDoc, increment, arrayUnion } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, doc, updateDoc, increment, arrayUnion, onSnapshot, query, orderBy } from 'firebase/firestore';
 import { db } from './lib/firebase';
 import { askGemini } from './geminiService';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -137,6 +144,29 @@ function AppContent() {
   const [aiResponse, setAiResponse] = useState<string | null>(null);
   const [aiInput, setAiInput] = useState('');
   const [aiLastQuery, setAiLastQuery] = useState<string | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isTtsEnabled, setIsTtsEnabled] = useState(false);
+  
+  // Dynamic AI Persona & User Mood states
+  const [aiTone, setAiTone] = useState<'rəsmi' | 'dostyana' | 'dəstəkləyici'>('rəsmi');
+  const [detectedMood, setDetectedMood] = useState<string>('Sakit / Maraqlı');
+  const [moodHistory, setMoodHistory] = useState<Array<{ tone: 'rəsmi' | 'dostyana' | 'dəstəkləyici'; mood: string; text: string; timestamp: Date }>>([
+    { tone: 'rəsmi', mood: 'Sakit / Maraqlı', text: 'İlk qarşılaşma.', timestamp: new Date() }
+  ]);
+  
+  // Continuous Live Voice Call Mode
+  const [isLiveVoiceMode, setIsLiveVoiceMode] = useState(false);
+  const [liveVoiceStatus, setLiveVoiceStatus] = useState<'idle' | 'listening' | 'speaking' | 'thinking'>('idle');
+  const [liveTranscript, setLiveTranscript] = useState('');
+  const [liveResponse, setLiveResponse] = useState('');
+  const liveRecognitionRef = useRef<any>(null);
+  
+  // High-fidelity natural Azerbaijani speech queue references
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const currentQueueIndexRef = useRef<number>(0);
+  const currentQueueRef = useRef<string[]>([]);
+  
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isAccessibilityModalOpen, setIsAccessibilityModalOpen] = useState(false);
   const [accSettings, setAccSettings] = useState({
@@ -215,10 +245,13 @@ function AppContent() {
     };
   }, []);
 
-  const handleAskAI = async (e?: React.FormEvent) => {
+  const handleAskAI = async (e?: React.FormEvent, directQuery?: string) => {
     if (e) e.preventDefault();
-    const queryToSend = aiInput.trim();
+    const queryToSend = (directQuery !== undefined ? directQuery : aiInput).trim();
     if (!queryToSend) return;
+
+    // Stop speaking old answers if we start a new query
+    cancelNaturalSpeech();
 
     setAiLoading(true);
     setAiLastQuery(queryToSend);
@@ -233,10 +266,418 @@ function AppContent() {
       jobs: "Məşğulluq və əmək bazarı haqqında."
     };
 
-    const response = await askGemini(queryToSend, contextMap[activePanel as keyof typeof contextMap] || "Ümumi profil sualı.");
-    setAiResponse(response);
+    const data = await askGemini(queryToSend, contextMap[activePanel as keyof typeof contextMap] || "Ümumi profil sualı.");
+    setAiResponse(data.text);
+    setAiTone(data.tone);
+    setDetectedMood(data.mood);
+    setMoodHistory(prev => [...prev.slice(-3), { tone: data.tone, mood: data.mood, text: queryToSend, timestamp: new Date() }]);
     setAiLoading(false);
+
+    // Auto-read aloud if TTS toggle is active
+    if (isTtsEnabled) {
+      speakResponseText(data.text);
+    }
   };
+
+  const toggleListening = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      triggerToast("Səsli daxiletmə bu cihaz tərəfindən dəstəklənmir.", "info", "Uğursuz");
+      return;
+    }
+
+    if (isListening) {
+      if ((window as any)._currRecognition) {
+        (window as any)._currRecognition.stop();
+      }
+      setIsListening(false);
+      return;
+    }
+
+    // Stop any speech output before recording
+    cancelNaturalSpeech();
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      recognition.lang = 'az-AZ';
+
+      recognition.onstart = () => {
+        setIsListening(true);
+        triggerToast("Sizi dinləyirəm... Suallarınızı səsləndirin.", "info", "Danışın");
+      };
+
+      recognition.onresult = (event: any) => {
+        const transcript = event.results[0][0].transcript;
+        if (transcript && transcript.trim()) {
+          setAiInput(transcript);
+          triggerToast(`Səsli daxiletmə: "${transcript}"`, "success", "Səs Tanındı");
+          handleAskAI(undefined, transcript);
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.error("Speech Recognition Error:", event);
+        setIsListening(false);
+        if (event.error === 'not-allowed') {
+          triggerToast("Mikrofona giriş rədd edildi. Zəhmət olmasa icazə verin.", "info", "Xəta");
+        } else {
+          triggerToast("Səsinizi anlaya bilmədim. Yenidən cəhd edin.", "info", "Anlaşılmadı");
+        }
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      (window as any)._currRecognition = recognition;
+      recognition.start();
+    } catch (error) {
+      console.error("Failed to start Speech Recognition:", error);
+      setIsListening(false);
+    }
+  };
+
+  const splitTextIntoSentenceChunks = (text: string) => {
+    let cleaned = text
+      .replace(/[*_#\-`]/g, '')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+
+    const sentenceEndRegex = /[^.!?]+[.!?]+/g;
+    let matches = cleaned.match(sentenceEndRegex) || [cleaned];
+    
+    let chunks: string[] = [];
+    for (let match of matches) {
+      let part = match.trim();
+      if (!part) continue;
+      
+      if (part.length > 150) {
+        const commaSplits = part.split(',');
+        for (let cs of commaSplits) {
+          let csPart = cs.trim();
+          if (!csPart) continue;
+          if (csPart.length > 150) {
+            const words = csPart.split(' ');
+            let temp = '';
+            for (let word of words) {
+              if ((temp + ' ' + word).trim().length > 150) {
+                chunks.push(temp.trim());
+                temp = word;
+              } else {
+                temp = (temp + ' ' + word).trim();
+              }
+            }
+            if (temp.trim()) {
+              chunks.push(temp.trim());
+            }
+          } else {
+            chunks.push(csPart);
+          }
+        }
+      } else {
+        chunks.push(part);
+      }
+    }
+    return chunks.map(c => c.trim()).filter(c => c.length > 0 && /[A-Za-z0-9əƏıİöÖüÜçÇşŞğĞа-яА-Я\d]/.test(c));
+  };
+
+  const playNaturalSpeech = (text: string, onStart?: () => void, onEnd?: () => void) => {
+    cancelNaturalSpeech();
+
+    const chunks = splitTextIntoSentenceChunks(text);
+    if (chunks.length === 0) {
+      if (onEnd) onEnd();
+      return;
+    }
+
+    currentQueueRef.current = chunks;
+    currentQueueIndexRef.current = 0;
+    setIsSpeaking(true);
+    if (onStart) onStart();
+
+    const speakWithBrowserSpeechSynthesis = (chunkText: string, onDone: () => void) => {
+      if ('speechSynthesis' in window) {
+        try {
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(chunkText);
+          const voices = window.speechSynthesis.getVoices();
+          
+          // Try to locate Azerbaijani or Turkish voice in the browser voices
+          const azVoice = voices.find(v => v.lang.toLowerCase().replace('_', '-').startsWith('az'));
+          const trVoice = voices.find(v => v.lang.toLowerCase().replace('_', '-').startsWith('tr'));
+          
+          if (azVoice) {
+            utterance.voice = azVoice;
+            utterance.lang = 'az-AZ';
+          } else if (trVoice) {
+            utterance.voice = trVoice;
+            utterance.lang = 'tr-TR';
+          } else {
+            utterance.lang = 'az-AZ';
+          }
+          
+          utterance.rate = 1.05;
+          
+          utterance.onend = () => {
+            onDone();
+          };
+          utterance.onerror = (e) => {
+            console.error("Browser speech synthesis error:", e);
+            onDone();
+          };
+          
+          window.speechSynthesis.speak(utterance);
+        } catch (errSync) {
+          console.error("speechSynthesis.speak failed:", errSync);
+          onDone();
+        }
+      } else {
+        onDone();
+      }
+    };
+
+    const playNextChunk = () => {
+      const idx = currentQueueIndexRef.current;
+      if (idx >= currentQueueRef.current.length) {
+        setIsSpeaking(false);
+        currentAudioRef.current = null;
+        if (onEnd) onEnd();
+        return;
+      }
+
+      const chunkText = currentQueueRef.current[idx];
+      const audioUrl = `/api/tts?text=${encodeURIComponent(chunkText)}`;
+      
+      const audio = new Audio(audioUrl);
+      currentAudioRef.current = audio;
+
+      audio.onended = () => {
+        currentQueueIndexRef.current += 1;
+        playNextChunk();
+      };
+
+      audio.onerror = (e) => {
+        console.error("Audio playback error for chunk, falling back to browser SpeechSynthesis:", chunkText, e);
+        speakWithBrowserSpeechSynthesis(chunkText, () => {
+          currentQueueIndexRef.current += 1;
+          playNextChunk();
+        });
+      };
+
+      audio.play().catch(err => {
+        console.warn("Audio playback issue, falling back to browser SpeechSynthesis:", err);
+        speakWithBrowserSpeechSynthesis(chunkText, () => {
+          currentQueueIndexRef.current += 1;
+          playNextChunk();
+        });
+      });
+    };
+
+    playNextChunk();
+  };
+
+  const cancelNaturalSpeech = () => {
+    if (currentAudioRef.current) {
+      try {
+        currentAudioRef.current.pause();
+        currentAudioRef.current.src = '';
+      } catch (e) {}
+      currentAudioRef.current = null;
+    }
+    if ('speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch (e) {}
+    }
+    currentQueueRef.current = [];
+    currentQueueIndexRef.current = 0;
+    setIsSpeaking(false);
+  };
+
+  const speakResponseText = (text: string) => {
+    if (isSpeaking) {
+      cancelNaturalSpeech();
+      return;
+    }
+    playNaturalSpeech(text);
+  };
+
+  const stopLiveVoiceMode = () => {
+    setIsLiveVoiceMode(false);
+    setLiveVoiceStatus('idle');
+    if (liveRecognitionRef.current) {
+      try {
+        liveRecognitionRef.current.onstart = null;
+        liveRecognitionRef.current.onresult = null;
+        liveRecognitionRef.current.onerror = null;
+        liveRecognitionRef.current.onend = null;
+        liveRecognitionRef.current.stop();
+      } catch (e) {
+        console.error("Error stopping live recognition:", e);
+      }
+      liveRecognitionRef.current = null;
+    }
+    cancelNaturalSpeech();
+    triggerToast("Canlı səsli söhbət rejimi dayandırıldı.", "info", "Səsli Rejim");
+  };
+
+  const startLiveVoiceMode = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      triggerToast("Sizin brauzeriniz canlı səsli danışıq rejimini dəstəkləmir.", "info", "Dəstəklənmir");
+      return;
+    }
+
+    setIsLiveVoiceMode(true);
+    setLiveVoiceStatus('listening');
+    setLiveTranscript('');
+    setLiveResponse('Bağlantı qurulur... Sizi dinləyirəm, danışın.');
+    
+    cancelNaturalSpeech();
+
+    playNaturalSpeech(
+      "Canlı səsli söhbət aktivdir. Sizi dinləyirəm, buyurun danışın.",
+      () => {
+        setLiveVoiceStatus('speaking');
+      },
+      () => {
+        setLiveVoiceStatus('listening');
+        runLiveRecognitionLoop(true);
+      }
+    );
+  };
+
+  const runLiveRecognitionLoop = (forceRestart: boolean = false) => {
+    if (liveVoiceStatus === 'speaking' || liveVoiceStatus === 'thinking') {
+      if (!forceRestart) return;
+    }
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    if (liveRecognitionRef.current) {
+      try {
+         liveRecognitionRef.current.onend = null;
+         liveRecognitionRef.current.stop();
+      } catch (e) {}
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = 'az-AZ';
+
+    recognition.onstart = () => {
+      setLiveVoiceStatus('listening');
+    };
+
+    recognition.onresult = (event: any) => {
+      let finalTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript;
+        } else {
+          const interim = event.results[i][0].transcript;
+          setLiveTranscript(interim);
+        }
+      }
+      if (finalTranscript.trim()) {
+        setLiveTranscript(finalTranscript);
+        recognition.onend = null;
+        recognition.stop();
+        handleLiveAIQuery(finalTranscript);
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      console.warn("Live Speech recognition error:", event.error);
+      if (event.error === 'no-speech') {
+        setTimeout(() => {
+          runLiveRecognitionLoop();
+        }, 1000);
+      } else {
+        setTimeout(() => {
+          runLiveRecognitionLoop();
+        }, 2000);
+      }
+    };
+
+    recognition.onend = () => {
+      setTimeout(() => {
+        runLiveRecognitionLoop();
+      }, 500);
+    };
+
+    liveRecognitionRef.current = recognition;
+    try {
+      recognition.start();
+    } catch (e) {
+      console.error("Failed to start speech recognition loop:", e);
+    }
+  };
+
+  const handleLiveAIQuery = async (userSpeech: string) => {
+    setLiveVoiceStatus('thinking');
+    setLiveResponse('Düşünürəm...');
+
+    const contextMap = {
+      overview: "Ümumi layihə haqqında canlı səsli sual.",
+      map: "Əlçatanlıq xəritəsi və fiziki maneələr haqqında canlı səsli sual.",
+      guide: "Xidmətlər və bələdçilər haqqında canlı səsli sual.",
+      volunteer: "Könüllülük proqramı haqqında canlı səsli sual.",
+      jobs: "Məşğulluq və əmək bazarı haqqında canlı səsli sual.",
+      profile: "İstifadəçinin profili və xalları haqqında canlı səsli sual."
+    };
+
+    try {
+      const data = await askGemini(userSpeech, contextMap[activePanel as keyof typeof contextMap] || "Canlı səsli söhbət rejimi.");
+      setLiveResponse(data.text);
+      setAiTone(data.tone);
+      setDetectedMood(data.mood);
+      setMoodHistory(prev => [...prev.slice(-3), { tone: data.tone, mood: data.mood, text: userSpeech, timestamp: new Date() }]);
+      setLiveVoiceStatus('speaking');
+      speakLiveResponse(data.text);
+    } catch (error) {
+      console.error("Live AI Ask Error:", error);
+      const errTxt = "Zəhmət olmasa yenidən söyləyin, xəta baş verdi.";
+      setLiveResponse(errTxt);
+      setLiveVoiceStatus('speaking');
+      speakLiveResponse(errTxt);
+    }
+  };
+
+  const speakLiveResponse = (responseTxt: string) => {
+    setLiveVoiceStatus('speaking');
+    playNaturalSpeech(
+      responseTxt,
+      () => {
+        setLiveVoiceStatus('speaking');
+      },
+      () => {
+        setLiveTranscript('');
+        setLiveVoiceStatus('listening');
+        setTimeout(() => {
+          runLiveRecognitionLoop(true);
+        }, 400);
+      }
+    );
+  };
+
+  useEffect(() => {
+    return () => {
+      if (liveRecognitionRef.current) {
+        try {
+          liveRecognitionRef.current.onstart = null;
+          liveRecognitionRef.current.onresult = null;
+          liveRecognitionRef.current.onerror = null;
+          liveRecognitionRef.current.onend = null;
+          liveRecognitionRef.current.stop();
+        } catch (e) {}
+      }
+      cancelNaturalSpeech();
+    };
+  }, []);
 
   return (
     <div 
@@ -431,53 +872,321 @@ function AppContent() {
                   </div>
                 </div>
 
-                <div className="bg-teal/5 border border-teal/20 rounded-xl p-4 md:p-5 flex flex-col">
-                  <div className="flex items-center justify-between gap-2 mb-3">
-                    <div className="flex items-center gap-2">
-                      <span className="w-2 h-2 bg-teal rounded-full animate-pulse"></span>
-                      <span className="text-[10px] font-black text-teal uppercase tracking-widest">ADDIM AI KÖMƏKÇİSİ</span>
+                <div className="bg-teal/5 border border-teal/20 rounded-xl p-4 md:p-5 flex flex-col justify-between min-h-[200px]">
+                  {isLiveVoiceMode ? (
+                    <div className="flex flex-col h-full justify-between">
+                      {/* Live Call Active Overlay */}
+                      <div className="flex items-center justify-between gap-2 mb-3 pb-2 border-b border-white/5">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2 h-2 bg-rose-500 rounded-full animate-ping"></span>
+                          <span className="text-[10px] font-black text-rose-400 uppercase tracking-widest">CANLI REJİM (ZƏNG)</span>
+                        </div>
+                        <button 
+                          type="button" 
+                          onClick={stopLiveVoiceMode}
+                          className="flex items-center gap-1 px-2.5 py-1 bg-red-500/10 hover:bg-red-500/30 border border-red-500/30 text-rose-400 rounded-lg text-[8px] font-black uppercase tracking-wider transition-all hover:scale-105 active:scale-95 cursor-pointer"
+                        >
+                          <PhoneOff className="w-2.5 h-2.5" />
+                          <span>ZƏNGİ BİTİR</span>
+                        </button>
+                      </div>
+
+                      {/* Animated Waveform */}
+                      <div className="flex flex-col items-center justify-center py-4 bg-navy/40 rounded-xl border border-white/5 relative overflow-hidden mb-3">
+                        <div className="absolute inset-0 flex items-center justify-center opacity-[0.03] pointer-events-none select-none">
+                          <div className="w-48 h-48 border-2 border-teal rounded-full animate-ping"></div>
+                          <div className="w-32 h-32 border-2 border-orange rounded-full animate-pulse"></div>
+                        </div>
+
+                        <div className="flex items-end justify-center gap-1 h-12 mb-3">
+                          {liveVoiceStatus === 'listening' ? (
+                            <>
+                              <div className="w-1 bg-teal rounded h-4 animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                              <div className="w-1 bg-teal rounded h-8 animate-bounce" style={{ animationDelay: '0.3s' }}></div>
+                              <div className="w-1 bg-teal rounded h-10 animate-bounce" style={{ animationDelay: '0.5s' }}></div>
+                              <div className="w-1 bg-teal rounded h-6 animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                              <div className="w-1 bg-teal rounded h-3 animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+                            </>
+                          ) : liveVoiceStatus === 'thinking' ? (
+                            <div className="flex items-center justify-center gap-1.5 text-orange py-1">
+                              <Loader2 className="w-4 h-4 animate-spin text-orange" />
+                            </div>
+                          ) : liveVoiceStatus === 'speaking' ? (
+                            <>
+                              <div className="w-1 bg-orange rounded h-8 animate-bounce" style={{ animationDelay: '0s' }}></div>
+                              <div className="w-1 bg-orange rounded h-12 animate-bounce" style={{ animationDelay: '0.15s' }}></div>
+                              <div className="w-1 bg-orange rounded h-6 animate-bounce" style={{ animationDelay: '0.3s' }}></div>
+                              <div className="w-1 bg-orange rounded h-10 animate-bounce" style={{ animationDelay: '0.45s' }}></div>
+                              <div className="w-1 bg-orange rounded h-4 animate-bounce" style={{ animationDelay: '0.6s' }}></div>
+                            </>
+                          ) : (
+                            <div className="w-1 bg-white/20 rounded h-2"></div>
+                          )}
+                        </div>
+
+                        <div className="text-center mb-1">
+                          <span className="text-[9px] font-black tracking-widest text-teal uppercase">
+                            {liveVoiceStatus === 'listening' ? 'SİZİ EŞİDİRƏM...' : liveVoiceStatus === 'speaking' ? 'MƏN DANIŞIRAM...' : 'DÜŞÜNÜRƏM...'}
+                          </span>
+                        </div>
+
+                        {/* Live CALL Mood and Personaj indicator */}
+                        <div className="flex flex-wrap items-center justify-center gap-1.5 shrink-0 select-none pb-1 animate-pulse">
+                          <span className={`px-2 py-0.5 rounded text-[8px] font-black tracking-wider shadow-sm border ${
+                            aiTone === 'dostyana' 
+                              ? 'bg-teal/20 text-teal border-teal/40'
+                              : aiTone === 'dəstəkləyici'
+                                ? 'bg-purple/20 text-purple border-purple/40'
+                                : 'bg-orange/20 text-orange border-orange/40'
+                          }`}>
+                            {aiTone === 'dostyana' ? '🤝 DOSTYANA REJİM' : aiTone === 'dəstəkləyici' ? '💜 DƏSTƏKLƏYİCİ REJİM' : '🏛️ RƏSMİ REJİM'}
+                          </span>
+                          <span className="text-white-soft/25 text-[8px]">•</span>
+                          <span className="text-[8px] font-bold text-muted-blue whitespace-nowrap">
+                            Hiss edilən: "{detectedMood}"
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Transcripts in Call */}
+                      <div className="text-xs leading-relaxed text-white-soft/90 space-y-2 h-[80px] overflow-y-auto pr-1 bg-navy/20 p-2 rounded-lg border border-white/5 no-scrollbar">
+                        {liveTranscript && (
+                          <div className="text-[10px] italic text-teal leading-snug">
+                            <span className="font-sans font-black uppercase text-[8px] text-teal/60 mr-1 block">SƏSİNİZ (Daxil olan):</span>
+                            "{liveTranscript}"
+                          </div>
+                        )}
+                        {liveResponse && (
+                          <div className="text-[10px] text-white-soft leading-normal">
+                            <span className="font-sans font-black uppercase text-[8px] text-orange/80 mr-1 block">ADDIM AI (Səsləndirilən):</span>
+                            {liveResponse}
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    {aiLoading && (
-                      <span className="text-[9px] font-bold text-orange uppercase tracking-widest animate-pulse">Cavab hazırlanır...</span>
-                    )}
-                  </div>
-                  
-                  <div className="text-xs leading-relaxed text-white-soft/80 px-2 border-l-2 border-teal/40 mb-4 h-fit max-h-[160px] overflow-y-auto space-y-2">
-                    {aiLastQuery && (
-                      <div className="text-[10px] font-black text-teal/60 uppercase tracking-widest mb-1.5">
-                        Sualınız: <span className="text-white-soft italic normal-case font-medium font-sans">"{aiLastQuery}"</span>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-between gap-2 mb-3">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2 h-2 bg-teal rounded-full animate-pulse"></span>
+                          <span className="text-[10px] font-black text-teal uppercase tracking-widest">ADDIM AI KÖMƏKÇİSİ</span>
+                        </div>
+                        
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={startLiveVoiceMode}
+                            className="flex items-center gap-1 px-2 py-0.5 rounded border border-teal/40 bg-teal/10 hover:bg-teal/25 text-teal text-[8px] font-black tracking-wider transition-all cursor-pointer hover:scale-105 active:scale-95 mr-1"
+                            title="Konkret canlı səsli söhbəti başladın"
+                          >
+                            <Phone className="w-2.5 h-2.5 animate-pulse" />
+                            <span>CANLI ZƏNG (LIVE)</span>
+                          </button>
+
+                          {aiLoading ? (
+                            <span className="text-[9px] font-bold text-orange uppercase tracking-widest animate-pulse">Cavab hazırlanır...</span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const nextTts = !isTtsEnabled;
+                                setIsTtsEnabled(nextTts);
+                                if (nextTts) {
+                                  triggerToast("Səsli Oxuma (TTS) aktivdir. Cavablar səsli oxunacaq.", "info", "Səs Aktiv");
+                                  if (aiResponse) speakResponseText(aiResponse);
+                                } else {
+                                  triggerToast("Səsli Oxuma söndürüldü.", "info", "Səs Söndü");
+                                  if ('speechSynthesis' in window) {
+                                    window.speechSynthesis.cancel();
+                                    setIsSpeaking(false);
+                                  }
+                                }
+                              }}
+                              className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[8px] font-black tracking-wider transition-all cursor-pointer ${
+                                isTtsEnabled 
+                                  ? 'bg-teal/20 border-teal text-teal shadow-[0_0_8px_rgba(0,184,169,0.2)]'
+                                  : 'bg-navy/40 border-white/10 text-muted-blue hover:text-white-soft'
+                              }`}
+                              title="Cavabları avtomatik səsli oxu"
+                            >
+                              {isTtsEnabled ? <Volume2 className="w-2.5 h-2.5 animate-pulse" /> : <VolumeX className="w-2.5 h-2.5" />}
+                              <span>SƏSLİ OXU</span>
+                            </button>
+                          )}
+                        </div>
                       </div>
-                    )}
-                    
-                    {aiLoading ? (
-                      <div className="flex items-center gap-2 text-teal font-black text-[11px] animate-pulse py-1">
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        <span>Süni İntellekt düşünür... Zəhmət olmasa gözləyin.</span>
+
+                      {/* Active Persona Indicator for Normal Text Assistant */}
+                      <div className="flex flex-wrap items-center gap-1.5 mb-3 px-2.5 py-1.5 bg-navy/60 rounded-lg border border-white/5 text-[9px] w-full select-none">
+                        <span className="text-[8px] font-black text-muted-blue uppercase">ANALİZ:</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider ${
+                          aiTone === 'dostyana' 
+                            ? 'bg-teal/20 text-teal border border-teal/20'
+                            : aiTone === 'dəstəkləyici'
+                              ? 'bg-purple/20 text-purple border border-purple/20'
+                              : 'bg-orange/20 text-orange border border-orange/20'
+                        }`}>
+                          {aiTone === 'dostyana' ? '🤝 DOSTYANA' : aiTone === 'dəstəkləyici' ? '💜 DƏSTƏKLƏYİCİ' : '🏛️ RƏSMİ'}
+                        </span>
+                        <span className="text-white-soft/10 text-[8px]">•</span>
+                        <span className="text-[8.5px] text-teal-bright">
+                          Səs tonu / Əhval: <span className="font-bold text-white-soft">"{detectedMood}"</span>
+                        </span>
                       </div>
-                    ) : (
-                      <p className="italic">
-                        {aiResponse || "Salam! Mən sizə əlçatımlı məkanlar, dövlət bələdçiləri, könüllülük proqramı və ya vakansiyalar barədə suallarınızı cavablandıra bilərəm."}
-                      </p>
-                    )}
-                  </div>
-                  
-                  <form onSubmit={handleAskAI} className="flex gap-2">
-                    <input 
-                      type="text" 
-                      value={aiInput}
-                      onChange={(e) => setAiInput(e.target.value)}
-                      disabled={aiLoading}
-                      placeholder={aiLoading ? "Süni İntellekt düşünür..." : "Sualınızı bura yazın..."} 
-                      className="flex-grow bg-navy border border-teal/20 rounded-lg px-4 py-2 text-xs focus:outline-none focus:border-teal min-w-0 disabled:opacity-50" 
-                    />
-                    <button 
-                      type="submit" 
-                      disabled={aiLoading || !aiInput.trim()}
-                      className="p-2 bg-teal text-navy rounded-lg hover:scale-105 active:scale-95 transition-all shrink-0 cursor-pointer disabled:opacity-30 disabled:hover:scale-100"
-                    >
-                      {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                    </button>
-                  </form>
+                      
+                      <div className="flex items-start justify-between gap-3 text-xs leading-relaxed text-white-soft/80 px-2 border-l-2 border-teal/40 mb-4 h-fit max-h-[160px] overflow-y-auto">
+                        <div className="space-y-1.5 flex-grow pr-1">
+                          {aiLastQuery && (
+                            <div className="text-[9px] font-black text-teal/60 uppercase tracking-widest mb-1.5">
+                              Sualınız: <span className="text-white-soft italic normal-case font-medium font-sans">"{aiLastQuery}"</span>
+                            </div>
+                          )}
+                          
+                          {aiLoading ? (
+                            <div className="flex items-center gap-2 text-teal font-black text-[11px] animate-pulse py-1">
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              <span>Süni İntellekt düşünür... Zəhmət olmasa gözləyin.</span>
+                            </div>
+                          ) : (
+                            <div className="italic">
+                              {aiResponse || "Salam! Mən sizə əlçatımlı məkanlar, dövlət bələdçiləri, könüllülük proqramı və ya vakansiyalar barədə suallarınızı cavablandıra bilərəm."}
+                            </div>
+                          )}
+                        </div>
+
+                        {aiResponse && !aiLoading && (
+                          <button
+                            type="button"
+                            onClick={() => speakResponseText(aiResponse)}
+                            className={`p-1.5 rounded border flex items-center justify-center transition-all cursor-pointer shrink-0 ${
+                              isSpeaking 
+                                ? 'bg-orange/20 border-orange text-orange animate-pulse shadow-[0_0_8px_rgba(249,115,22,0.3)]' 
+                                : 'bg-navy/60 border-white/10 text-teal hover:border-teal/50 hover:bg-teal/10'
+                            }`}
+                            title={isSpeaking ? "Səsi dayandır" : "Səsli oxutdur"}
+                          >
+                            {isSpeaking ? (
+                              <VolumeX className="w-3 h-3 text-orange animate-bounce" />
+                            ) : (
+                              <Volume2 className="w-3 h-3 text-teal" />
+                            )}
+                          </button>
+                        )}
+                      </div>
+                      
+                      {/* Cari Danışıq Tərzi və Emosional Əlaqələr Xülasəsi Qutusu */}
+                      <div className="mb-4 bg-navy/60 border border-white/5 rounded-lg p-2.5 text-[10px] space-y-2">
+                        <div className="flex items-center justify-between text-[8px] font-black text-teal uppercase tracking-wider pb-1.5 border-b border-white/5">
+                          <span>🔮 EMOSİONAL ƏLAQƏ PANELİ</span>
+                          <span className="text-white-soft/40 lowercase font-medium">real-time sync</span>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="bg-navy/70 p-2 rounded border border-white/5">
+                            <span className="text-muted-blue text-[8px] font-black uppercase block mb-1">Cari Danışıq Tərzi:</span>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-sm select-none">
+                                {aiTone === 'dostyana' ? '🤝' : aiTone === 'dəstəkləyici' ? '💜' : '🏛️'}
+                              </span>
+                              <div>
+                                <span className={`font-extrabold block text-[9px] uppercase tracking-wide ${
+                                  aiTone === 'dostyana' ? 'text-teal' : aiTone === 'dəstəkləyici' ? 'text-purple' : 'text-orange'
+                                }`}>
+                                  {aiTone === 'dostyana' ? 'Dostyana' : aiTone === 'dəstəkləyici' ? 'Dəstəkləyici' : 'Rəsmi'}
+                                </span>
+                                <span className="text-[8px] text-white-soft/60 block leading-tight">
+                                  {aiTone === 'dostyana' 
+                                    ? 'Fərdi və səmimi.' 
+                                    : aiTone === 'dəstəkləyici' 
+                                      ? 'Empatik və qayğıkeş.' 
+                                      : 'Dəqiq və məsuliyyətli.'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          
+                          <div className="bg-navy/70 p-2 rounded border border-white/5 flex flex-col justify-between">
+                            <div>
+                              <span className="text-muted-blue text-[8px] font-black uppercase block mb-1">Əhval tərəqqisi:</span>
+                              <div className="flex flex-wrap items-center gap-1 leading-none">
+                                {moodHistory.map((item, idx) => (
+                                  <React.Fragment key={idx}>
+                                    {idx > 0 && <span className="text-white-soft/20 text-[7px]">→</span>}
+                                    <span 
+                                      className={`px-1 py-0.5 rounded-[3px] text-[7.5px] font-bold ${
+                                        item.tone === 'dostyana' 
+                                          ? 'bg-teal/10 text-teal-bright border border-teal/20' 
+                                          : item.tone === 'dəstəkləyici' 
+                                            ? 'bg-purple/10 text-purple border border-purple/20' 
+                                            : 'bg-orange/10 text-orange border border-orange/20'
+                                      }`}
+                                      title={`Sual: "${item.text}"`}
+                                    >
+                                      {item.mood.split('/')[0].trim()}
+                                    </span>
+                                  </React.Fragment>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {moodHistory.length >= 1 && (
+                          <div className="text-[8.5px] text-white-soft/70 leading-relaxed bg-navy/30 px-2 py-1.5 rounded border-l-2 border-teal-bright/40">
+                            <strong>Emosional Xülasə:</strong>{' '}
+                            {(() => {
+                              const recentMoods = moodHistory.map(h => h.mood.toLowerCase());
+                              const list = recentMoods.join(', ');
+                              if (aiTone === 'dəstəkləyici') {
+                                return "İstifadəçinin müraciətində kədər, çətinlik və ya fiziki əngəldən yaranan sıxıntı hiss olunur. AI tam empathetic yanaşaraq ruhlandırıcı və qayğıkeş dildə səmimi kömək təklif edir.";
+                              }
+                              if (aiTone === 'dostyana') {
+                                return "İstifadəçi ilə qeyri-formal, müsbət və fərdi səmimi münasibət qurulmuşdur. Söhbət mehriban, qayğısız dostyana tonda davam edir.";
+                              }
+                              return "Dəqiq, ciddi və faydalı məlumat mübadiləsi aparılır. ADDIM köməkçisi platformanın rəsmi, dəqiqlik nümayiş etdirən qaydalarına uyğun bələdçilik göstərir.";
+                            })()}
+                          </div>
+                        )}
+                      </div>
+                      
+                      <form onSubmit={(e) => handleAskAI(e)} className="flex gap-2">
+                        <input 
+                          type="text" 
+                          value={aiInput}
+                          onChange={(e) => setAiInput(e.target.value)}
+                          disabled={aiLoading || isListening}
+                          placeholder={
+                            aiLoading 
+                              ? "Süni İntellekt düşünür..." 
+                              : isListening 
+                                ? "Sizi dinləyirəm, danışın..." 
+                                : "Sualınızı yazın və ya səsləndirin..."
+                          } 
+                          className="flex-grow bg-navy border border-teal/20 rounded-lg px-4 py-2 text-xs focus:outline-none focus:border-teal min-w-0 disabled:opacity-50" 
+                        />
+                        <button
+                          type="button"
+                          onClick={toggleListening}
+                          disabled={aiLoading}
+                          className={`p-2 rounded-lg border transition-all shrink-0 cursor-pointer disabled:opacity-30 ${
+                            isListening 
+                              ? 'bg-rose-500/25 border-rose-500 text-rose-400 animate-pulse shadow-[0_0_10px_rgba(244,63,94,0.4)] scale-105' 
+                              : 'bg-navy/60 border-white/10 text-teal hover:border-teal/50 hover:bg-teal/10 hover:scale-105 active:scale-95'
+                          }`}
+                          title={isListening ? "Dinləməni dayandır" : "Mikrofonu aktivləşdir"}
+                        >
+                          <Mic className="w-4 h-4" />
+                        </button>
+                        <button 
+                          type="submit" 
+                          disabled={aiLoading || isListening || !aiInput.trim()}
+                          className="p-2 bg-teal text-navy rounded-lg hover:scale-105 active:scale-95 transition-all shrink-0 cursor-pointer disabled:opacity-30 disabled:hover:scale-100"
+                        >
+                          {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                        </button>
+                      </form>
+                    </>
+                  )}
                 </div>
               </section>
 
@@ -520,7 +1229,7 @@ function AppContent() {
               exit={{ opacity: 0, y: -10 }}
               className="max-w-5xl mx-auto pb-10"
             >
-              {activePanel === 'map' && <MapPanel />}
+              {activePanel === 'map' && <MapPanel isAuthModalOpen={isAuthModalOpen} setIsAuthModalOpen={setIsAuthModalOpen} />}
               {activePanel === 'guide' && <GuidePanel />}
               {activePanel === 'volunteer' && <VolunteerPanel />}
               {activePanel === 'jobs' && <JobsPanel />}
@@ -691,7 +1400,12 @@ function PhaseProgress({ label, period, percent, color }: { label: string, perio
   );
 }
 
-function MapPanel() {
+interface MapPanelProps {
+  isAuthModalOpen: boolean;
+  setIsAuthModalOpen: (open: boolean) => void;
+}
+
+function MapPanel({ isAuthModalOpen, setIsAuthModalOpen }: MapPanelProps) {
   const [activeFilters, setActiveFilters] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedLoc, setSelectedLoc] = useState<any>(null);
@@ -699,6 +1413,22 @@ function MapPanel() {
   const [notifText, setNotifText] = useState("Məlumat Təsdiqləndi");
   const { user, profile, refreshProfile } = useAuth();
   
+  const [allReviews, setAllReviews] = useState<any[]>([]);
+
+  useEffect(() => {
+    const q = query(collection(db, 'location_reviews'), orderBy('createdAt', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const list: any[] = [];
+      snapshot.forEach((doc) => {
+        list.push({ id: doc.id, ...doc.data() });
+      });
+      setAllReviews(list);
+    }, (error) => {
+      console.error("Failed to load location reviews:", error);
+    });
+    return () => unsubscribe();
+  }, []);
+
   // Local storage for map locations and verifications
   const [mapLocations, setMapLocations] = useState(() => {
     try {
@@ -1031,8 +1761,19 @@ function MapPanel() {
                               <p className="text-[10px] text-muted-blue opacity-80 mt-0.5">📍 {loc.addr}</p>
                             </div>
                           </div>
-                          <div className="bg-navy rounded-lg p-1.5 border border-white/5 flex items-center justify-center text-yellow font-black text-[10px]">
-                            {loc.rating} ★
+                          <div className="bg-navy rounded-lg p-1.5 border border-white/5 flex items-center justify-center text-yellow font-black text-[10px] gap-1 shrink-0">
+                            {(() => {
+                              const locReviews = allReviews.filter(r => r.locationId === loc.id);
+                              const ratingVal = locReviews.length > 0 
+                                ? (locReviews.reduce((sum, r) => sum + r.rating, 0) / locReviews.length).toFixed(1)
+                                : loc.rating.toFixed(1);
+                              return (
+                                <>
+                                  <span>{ratingVal} ★</span>
+                                  {locReviews.length > 0 && <span className="text-[8px] text-muted-blue">({locReviews.length})</span>}
+                                </>
+                              );
+                            })()}
                           </div>
                         </div>
 
@@ -1089,33 +1830,17 @@ function MapPanel() {
                 icon={customIcon(selectedLoc?.id === loc.id ? "#ffffff" : getResponsiveColor(loc.features))}
                 eventHandlers={{ click: () => setSelectedLoc(loc) }}
               >
-                <Popup className="custom-popup" minWidth={280}>
-                  <div className="p-4 bg-navy-light relative overflow-hidden rounded-xl border border-white/10 shadow-2xl">
-                    <div className="absolute top-0 right-0 p-3 text-3xl opacity-20 transform rotate-12 select-none pointer-events-none">{loc.type}</div>
-                    <h3 className="font-outfit font-black text-lg text-white uppercase mb-1 drop-shadow pr-8">{loc.name}</h3>
-                    <p className="text-[10px] text-teal font-bold tracking-widest uppercase mb-4 opacity-80">{loc.addr}</p>
-                    
-                    <div className="space-y-2 mb-4">
-                      {loc.features.map((f: string) => (
-                        <div key={f} className="flex justify-between items-center p-2 rounded-lg bg-navy border border-white/5 hover:border-teal/30 transition-colors group">
-                           <span className="text-[10px] font-bold uppercase tracking-tight text-white-soft">{f}</span>
-                           <button 
-                             onClick={(e) => { e.stopPropagation(); handleVerify(loc.id, f); }}
-                             className="text-[9px] bg-teal/10 text-teal hover:bg-teal hover:text-navy px-3 py-1.5 rounded text-black transition-colors flex items-center gap-1 font-black shadow-inner"
-                           >
-                             Təsdiqlə ({verifications[loc.id]?.[f] || 0})
-                           </button>
-                        </div>
-                      ))}
-                    </div>
-
-                    <button 
-                      onClick={() => handleStartNav(loc)}
-                      className="w-full bg-gradient-to-r from-teal to-teal/80 text-navy font-black text-[10px] uppercase tracking-widest py-3 rounded-xl hover:opacity-90 transition-opacity shadow-lg shadow-teal/20"
-                    >
-                      Bura Get
-                    </button>
-                  </div>
+                <Popup className="custom-popup" minWidth={320}>
+                  <LocationPopupContent
+                    loc={loc}
+                    allReviews={allReviews}
+                    user={user}
+                    profile={profile}
+                    verifications={verifications}
+                    handleVerify={handleVerify}
+                    handleStartNav={handleStartNav}
+                    setIsAuthModalOpen={setIsAuthModalOpen}
+                  />
                 </Popup>
               </Marker>
             ))}
@@ -2294,6 +3019,224 @@ function SectionHeader({ title, badge, desc }: { title: string, badge: string, d
       <p className="text-muted-blue text-[11px] md:text-base max-w-2xl leading-relaxed">
         {desc}
       </p>
+    </div>
+  );
+}
+
+interface LocationPopupContentProps {
+  loc: any;
+  allReviews: any[];
+  user: any;
+  profile: any;
+  verifications: any;
+  handleVerify: (locId: number, feature: string) => void;
+  handleStartNav: (loc: any) => void;
+  setIsAuthModalOpen: (open: boolean) => void;
+}
+
+function LocationPopupContent({ 
+  loc, 
+  allReviews, 
+  user, 
+  profile, 
+  verifications, 
+  handleVerify, 
+  handleStartNav,
+  setIsAuthModalOpen 
+}: LocationPopupContentProps) {
+  const [activeTab, setActiveTab] = useState<'info' | 'reviews'>('info');
+  const [newRating, setNewRating] = useState<number>(5);
+  const [hoveredRating, setHoveredRating] = useState<number | null>(null);
+  const [newComment, setNewComment] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  // Filter reviews for this location
+  const locReviews = allReviews.filter(r => r.locationId === loc.id);
+  const totalRating = locReviews.reduce((sum, r) => sum + r.rating, 0);
+  const avgRating = locReviews.length > 0 
+    ? (totalRating / locReviews.length).toFixed(1) 
+    : loc.rating.toFixed(1);
+
+  const handleSubmitReview = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) {
+      triggerToast("Rəy yazmaq üçün daxil olun.", "info", "Giriş Lazımdır");
+      setIsAuthModalOpen(true);
+      return;
+    }
+    if (!newComment.trim()) return;
+    setSubmitting(true);
+    try {
+      await addDoc(collection(db, 'location_reviews'), {
+        locationId: loc.id,
+        userId: user.uid,
+        userName: profile?.displayName || user.displayName || 'Anonim',
+        rating: newRating,
+        comment: newComment,
+        createdAt: serverTimestamp()
+      });
+      setNewComment('');
+      triggerToast("Rəyiniz uğurla əlavə edildi! 🌟", "success", "Rəy Əlavə Edildi");
+    } catch (error) {
+      console.error("Failed to submit location review:", error);
+      triggerToast("Rəy göndərilərkən xəta baş verdi.", "info", "Xəta");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="p-3 bg-navy-light relative overflow-hidden rounded-xl border border-white/10 shadow-2xl w-[260px] sm:w-[300px]">
+      <div className="absolute top-0 right-0 p-3 text-3xl opacity-10 transform rotate-12 select-none pointer-events-none">{loc.type}</div>
+      <h3 className="font-outfit font-black text-sm text-white uppercase mb-1 drop-shadow pr-8 truncate">{loc.name}</h3>
+      <p className="text-[9px] text-teal font-bold tracking-widest uppercase mb-3 opacity-80 truncate">{loc.addr}</p>
+
+      {/* Dynamic Star Summary Header */}
+      <div className="flex items-center gap-1.5 mb-3 bg-navy/40 p-1.5 rounded-lg border border-white/5">
+        <div className="flex text-yellow">
+          {[1, 2, 3, 4, 5].map((s) => (
+            <Star key={s} className={`w-3 h-3 ${parseFloat(avgRating) >= s ? 'fill-yellow text-yellow' : 'text-white/20'}`} />
+          ))}
+        </div>
+        <span className="text-[10px] font-black text-white">{avgRating}</span>
+        <span className="text-[8px] text-muted-blue">({locReviews.length} rəy)</span>
+      </div>
+
+      {/* Tabs Layout */}
+      <div className="flex border-b border-white/10 gap-2 mb-3">
+        <button
+          type="button"
+          onClick={() => setActiveTab('info')}
+          className={`pb-1.5 text-[9px] uppercase font-black tracking-widest transition-all cursor-pointer ${
+            activeTab === 'info' ? 'text-teal border-b-2 border-teal' : 'text-muted-blue hover:text-white'
+          }`}
+        >
+          Özəlliklər
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('reviews')}
+          className={`pb-1.5 text-[9px] uppercase font-black tracking-widest transition-all cursor-pointer ${
+            activeTab === 'reviews' ? 'text-teal border-b-2 border-teal' : 'text-muted-blue hover:text-white'
+          }`}
+        >
+          Rəylər ({locReviews.length})
+        </button>
+      </div>
+
+      {/* Tab 1: Info (Features, Verifying, Navigation) */}
+      {activeTab === 'info' && (
+        <div className="space-y-3">
+          <div className="space-y-1.5 max-h-[100px] overflow-y-auto no-scrollbar">
+            {loc.features && loc.features.length > 0 ? (
+              loc.features.map((f: string) => (
+                <div key={f} className="flex justify-between items-center p-1.5 rounded-lg bg-navy border border-white/5 hover:border-teal/30 transition-colors">
+                   <span className="text-[9px] font-bold uppercase tracking-tight text-white-soft">{f}</span>
+                   <button 
+                     type="button"
+                     onClick={(e) => { e.stopPropagation(); handleVerify(loc.id, f); }}
+                     className="text-[8px] bg-teal/15 text-teal hover:bg-teal hover:text-navy px-2 py-1 rounded transition-colors flex items-center gap-0.5 font-black shrink-0 cursor-pointer"
+                   >
+                     Təsdiqlə ({verifications[loc.id]?.[f] || 0})
+                   </button>
+                </div>
+              ))
+            ) : (
+              <p className="text-[9px] text-muted-blue italic py-2 text-center w-full">Heç bir əlçatımlılıq özəlliyi təyin edilməyib.</p>
+            )}
+          </div>
+
+          <button 
+            type="button"
+            onClick={() => handleStartNav(loc)}
+            className="w-full bg-gradient-to-r from-teal to-teal/80 text-navy font-black text-[9px] uppercase tracking-widest py-2.5 rounded-lg hover:opacity-90 transition-opacity shadow-lg shadow-teal/10 cursor-pointer"
+          >
+            Bura Get
+          </button>
+        </div>
+      )}
+
+      {/* Tab 2: Reviews Interface */}
+      {activeTab === 'reviews' && (
+        <div className="space-y-3">
+          {/* Reviews List */}
+          <div className="space-y-2 max-h-[100px] overflow-y-auto pr-1 scrollbar-thin">
+            {locReviews.length === 0 ? (
+              <p className="text-[9px] text-muted-blue italic text-center py-4">Hələ rəy yazılmayıb. İlk yazan siz olun!</p>
+            ) : (
+              locReviews.map((rev) => (
+                <div key={rev.id} className="p-2 bg-navy/50 rounded-lg border border-white/5 flex flex-col gap-1 text-left">
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-[9px] font-black text-white truncate max-w-[100px]">{rev.userName}</span>
+                    <div className="flex shrink-0">
+                      {[1, 2, 3, 4, 5].map((s) => (
+                        <Star key={s} className={`w-2 h-2 ${rev.rating >= s ? 'fill-yellow text-yellow' : 'text-white/10'}`} />
+                      ))}
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-white-soft leading-snug whitespace-pre-wrap">{rev.comment}</p>
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* Add Review Form */}
+          {user ? (
+            <form onSubmit={handleSubmitReview} className="space-y-2 pt-2 border-t border-white/10">
+              <span className="text-[8px] font-black tracking-widest uppercase text-muted-blue block">Məkanı Qiymətləndir</span>
+              
+              {/* Star rating selector */}
+              <div className="flex items-center gap-1">
+                {[1, 2, 3, 4, 5].map((num) => {
+                  const checkVal = hoveredRating !== null ? hoveredRating : newRating;
+                  return (
+                    <button
+                      key={num}
+                      type="button"
+                      onClick={() => setNewRating(num)}
+                      onMouseEnter={() => setHoveredRating(num)}
+                      onMouseLeave={() => setHoveredRating(null)}
+                      className="text-yellow-500 hover:scale-110 active:scale-95 transition-all outline-none cursor-pointer"
+                    >
+                      <Star className={`w-3.5 h-3.5 ${checkVal >= num ? 'fill-yellow text-yellow' : 'text-white/20'}`} />
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex gap-2 items-center">
+                <input
+                  type="text"
+                  value={newComment}
+                  onChange={(e) => setNewComment(e.target.value)}
+                  placeholder="Şərhiniz..."
+                  maxLength={500}
+                  className="flex-1 bg-navy/80 border border-white/10 rounded-lg px-2 py-1.5 text-[10px] text-white outline-none focus:border-teal/50"
+                  required
+                />
+                <button
+                  type="submit"
+                  disabled={submitting || !newComment.trim()}
+                  className="bg-teal text-navy text-[8px] font-black uppercase tracking-wider px-2.5 py-2 rounded-lg justify-center flex items-center hover:opacity-90 disabled:opacity-50 cursor-pointer shrink-0"
+                >
+                  {submitting ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Göndər'}
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="pt-2 border-t border-white/10 text-center">
+              <p className="text-[9px] text-muted-blue mb-2">Rəy bildirmək üçün hesabınıza giriş etməlisiniz.</p>
+              <button
+                type="button"
+                onClick={() => setIsAuthModalOpen(true)}
+                className="w-full bg-teal/10 text-teal hover:bg-teal hover:text-navy text-[8px] font-black uppercase py-1.5 rounded transition-all cursor-pointer"
+              >
+                Daxil Ol
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

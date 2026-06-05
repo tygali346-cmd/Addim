@@ -31,6 +31,33 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["name", "addr", "features", "suggestedBy", "status"]
+    },
+    "LocationReview": {
+      "title": "Location Review",
+      "description": "User reviews and star ratings for map locations",
+      "type": "object",
+      "properties": {
+        "locationId": { "type": "integer" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "rating": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "comment": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["locationId", "userId", "userName", "rating", "comment", "createdAt"]
+    },
+    "AppFeedback": {
+      "title": "App Feedback",
+      "description": "Positive or negative user feedback about the ADDIM application",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "type": { "type": "string", "enum": ["positive", "negative"] },
+        "comment": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "userName", "type", "comment", "createdAt"]
     }
   },
   "firestore": {
@@ -41,6 +68,14 @@
     "suggested_locations/{suggestionId}": {
       "schema": "SuggestedLocation",
       "description": "User suggested map locations pending moderation"
+    },
+    "location_reviews/{reviewId}": {
+      "schema": "LocationReview",
+      "description": "Location reviews with ratings"
+    },
+    "app_feedback/{feedbackId}": {
+      "schema": "AppFeedback",
+      "description": "User feedback submissions about the application"
     }
   }
 }

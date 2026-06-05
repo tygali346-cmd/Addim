@@ -23,22 +23,33 @@ async function startServer() {
 
   // Helper for resilient fallback content generation to bypass model-specific free-tier quotas (e.g. 429)
   async function generateContentWithFallback(params: { contents: string; config?: any }) {
-    const modelChain = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash"];
+    const modelChain = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-flash-latest"];
     let lastError: any = null;
 
     for (const model of modelChain) {
-      try {
-        console.log(`[AI] Attempting content generation with model: ${model}`);
-        const response = await ai.models.generateContent({
-          model,
-          contents: params.contents,
-          config: params.config,
-        });
-        console.log(`[AI] ✅ Success using model: ${model}`);
-        return { response, activeModel: model };
-      } catch (err: any) {
-        console.warn(`[AI] ⚠️ Model failed or rate-limited: ${model}. Error:`, err?.message || err);
-        lastError = err;
+      let attempts = 2;
+      for (let i = 0; i < attempts; i++) {
+        try {
+          console.log(`[AI] Attempting content generation with model: ${model} (attempt ${i + 1})`);
+          const response = await ai.models.generateContent({
+            model,
+            contents: params.contents,
+            config: params.config,
+          });
+          console.log(`[AI] ✅ Success using model: ${model}`);
+          return { response, activeModel: model };
+        } catch (err: any) {
+          console.warn(`[AI] ⚠️ Model failed or rate-limited: ${model} (attempt ${i + 1}). Error:`, err?.message || err);
+          lastError = err;
+          const errStr = String(err?.message || err || "").toLowerCase();
+          const isRateLimitOrTemp = errStr.includes('429') || errStr.includes('503') || errStr.includes('resource_exhausted') || errStr.includes('unavailable');
+          if (isRateLimitOrTemp && i < attempts - 1) {
+            console.log(`[AI] Retrying ${model} in 300ms due to temporary error...`);
+            await new Promise(res => setTimeout(res, 300));
+          } else {
+            break; // Proceed to the next model in chain immediately
+          }
+        }
       }
     }
     throw lastError || new Error("Süni intellekt modellərinin hamısı xətalı cavab verdi.");
@@ -114,27 +125,37 @@ async function startServer() {
     }
 
     try {
-      const fullPrompt = `Sən Azərbaycanda fəaliyyət göstərən, əlilliyi olan şəxslər üçün nəzərdə tutulmuş "ADDIM" rəqəmsal əlçatımlılıq platformasının rəsmi köməkçisisən. 
+      const fullPrompt = `Sən Azərbaycanda fəaliyyət göstərən, əlilliyi olan şəxslər üçün nəzərdə tutulmuş "ADDIM" rəqəmsal əlçatımlılıq platformasının rəsmi ağıllı köməkçisisən. 
 Platformanın 4 modulu var: 
 1. Xəritə (Məkanların əlil arabası və digər əlçatımlılıq dərəcələri haqqında məlumat).
 2. Bələdçi (Dövlət və özəl qurumların əlçatımlılıq üzrə xidmət bələdçiləri).
 3. Könüllülük (Dəstək axtaranlar və kömək etmək istəyən könüllülər).
 4. İş imkanları (Əlilliyi olan şəxslər üçün əmək bazarı və vakansiyalar).
 
-DANIŞIQ QAYDALARI (MÜTLƏQ KƏNARSIZ ƏMƏL ET):
-- Çox qısa və sadə danış. Cavabın maksimum 2-3 cümlədən ibarət olmalıdır.
-- İnsan kimi səmimi və təbii yaz. Süni, şablon, robotik və ya müştəri xidmətləri tonundakı ifadələri ("Əlbəttə!", "Xoş gördük!", "Sizə kömək etməkdən məmnunam!", "Buyurun, necə kömək edə bilərəm?") QƏTİYYƏN İSTİFADƏ ETMƏ.
-- Cavabı uzatmadan birbaşa məsələnin özünə keç.
-- Əgər qeyri-müəyyənlik varsa və ya daha dəqiq məlumat lazımdırsa, mütləq yönləndirici əks-sual ver ("Hansı rayonda/şəhərdəsiniz?", "Nə növ məkandır?", "Nə növ yardım lazımdır?" kimi).
-- Siyahı və ya bəndləri yalnız həqiqətən məlumatı qruplaşdırmaq tam zəruri olduqda istifadə et, adətən düz mətndən istifadə et.
+DÖVRİ/DİNAMİK PERSONAJ VƏ ƏHVAL ANALİZİ TƏLƏBİ:
+İstifadəçinin səsli və ya yazılı daxil etdiyi sualın/söhbətin tərzini və əhval-ruhiyyəsini (hissini) mütləq analiz etməli və dinamik şəkildə əlaqəli şəxsiyyətə bürünməlisən.
 
-NÜMUNƏ 1 (MÜKƏMMƏL DÜZGÜN):
-İstifadəçi: "Bakıda əlil arabası ilə girə biləcəyim restoran varmı?"
-Sən: "Xəritə modulundan yoxlaya bilərsiniz. Hansı rayonda axtarırsınız?"
+Sənin uyğunlaşmalı olduğun 3 dynamic personaj (TONE) var:
+1. "rəsmi" -> İstifadəçi ciddi, rəsmi, quru və ya konkret məlumat xarakterli suallar verəndə. Cavab tonu rəsmi, dəqiq, məsuliyyətli lakin səmimi olmalıdır.
+2. "dostyana" -> İstifadəçi dildə qeyri-formal/casual danışanda, zarafat edəndə, salamlaşanda (məsələn: "salam", "necəsən qardaş", "əla"), və ya könüllülük üzrə yüksək həvəs göstərəndə. Cavab tonu istiqanlı, gənc, enerjili və qeyri-formal olmalıdır.
+3. "dəstəkləyici" -> İstifadəçi fiziki/psixoloji maneədən, ümidsizlikdən, çətinlikdən şikayətlənəndə, qəmgin və ya yorğun olanda (məsələn: "belə yaşamaq çox çətindir", "hər yer bağlıdır", "mənə heç kim dəstək olmur"). Cavab tonu olduqca empatik, dərindən hiss edən, ürək-dirək verən, həssas və dəstəkləyici olmalıdır.
 
-NÜMUNƏ 2 (MÜKƏMMƏL DÜZGÜN):
-İstifadəçi: "Könüllü olmaq üçün hara daxil olum?"
-Sən: "Könüllülük modulunun onboarding suallarını tamamlayıb qeydiyyatdan keçə bilərsiniz. Hansı sahədə kömək edə bilərsiniz?"
+DANIŞIQ QAYDALARI (MÜTLƏQ ENMƏDƏN ƏMƏL ET):
+- Çox qısa və sadə danış. Cavabın maksimum 2-3 cümlədən ibarət olmalıdır. (MƏQSƏD YALNIZ SƏSLƏNDİRMƏ VƏ RƏVANLIQDIR).
+- Süni, robotik və ya cansız şablon müştəri xidməti ifadələrini ("Əlbəttə!", "Xoş gördük!", "Buyurun, mən sizə kömək etməkdən şadam!") QƏTİYYƏN İSTİFADƏ ETMƏ. Cavaba birbaşa və insani keç.
+- Əgər mətndə qeyri-müəyyənlik varsa, həmişə yönləndirici sual ver ("Şəhərin hansı hissəsində axtarırsınız?", "Dəqiq necə bir köməyə ehtiyacınız var?" və s.)
+
+Yalnız bu strukturu çıxış et:
+[TONE: rəsmi və ya dostyana və ya dəstəkləyici]
+[MOOD: <istifadəçinin daxil etdiyi mətndə hiss edilən əhval (məsələn: "Səmimi / Salamlaşma", "Ümidsiz / Kədərli", "Ciddi / Məlumat yönümlü", "Narahat / Şikayətçi")>]
+[TEXT: <seçdiyin personaja uyğun 2-3 cümləlik cavabın>]
+
+Məsələn:
+İstifadəçi: "çox sıxılıram heç yerə çıxa bilmirəm hər yer pilləkəndir"
+Sən:
+[TONE: dəstəkləyici]
+[MOOD: Sıxılmış və maneələrdən yorulmuş]
+[TEXT: Sizi çox yaxşı anlayıram, bəzən pilləkənlər böyük əngəl olur. Amma gəlin xəritəmizə baxaq, yaxınlığınızda rampası və liftsiz girişi olan rahat parklar tapıb sizi sevindirək.]
 
 Context: ${context || ""}
 User: ${prompt}`;
@@ -143,10 +164,161 @@ User: ${prompt}`;
         contents: fullPrompt
       });
 
-      res.json({ text: response.text || "Bağışlayın, cavab hazırlana bilmədi." });
+      const rawText = response.text || "";
+      console.log(`[AI RAW RESP]:`, rawText);
+
+      // Extract details
+      let tone = "rəsmi";
+      let mood = "Məlumat yönümlü";
+      let text = rawText;
+
+      const toneMatch = rawText.match(/\[TONE:\s*(rəsmi|dostyana|dəstəkləyici)\]/i);
+      const moodMatch = rawText.match(/\[MOOD:\s*([^\]]+)\]/i);
+      const textMatch = rawText.match(/\[TEXT:\s*([\s\S]+)/i);
+
+      if (toneMatch) tone = toneMatch[1].toLowerCase().trim();
+      if (moodMatch) mood = moodMatch[1].trim();
+      if (textMatch) {
+        text = textMatch[1].trim();
+      } else {
+        // Fallback clean-up if structure is slightly skewed
+        text = rawText
+          .replace(/\[TONE:[^\]]+\]/gi, "")
+          .replace(/\[MOOD:[^\]]+\]/gi, "")
+          .replace(/\[TEXT:/gi, "")
+          .replace(/\]/g, "")
+          .trim();
+      }
+
+      res.json({ text, tone, mood });
     } catch (error: any) {
       console.error("Gemini server-side API Error:", error);
       res.status(500).json({ error: "Google Gemini xidmətinə qoşularkən xəta baş verdi. Zəhmət olmasa bir qədər sonra yenidən yoxlayın." });
+    }
+  });
+
+  // Helper to wrap raw 24kHz 16-bit PCM mono audio in a standard 44-byte WAV header for native browser playback
+  function encodeWav(pcmData: Buffer, sampleRate: number = 24000): Buffer {
+    const header = Buffer.alloc(44);
+    // RIFF identifier
+    header.write("RIFF", 0);
+    // file length minus RIFF identifier and size descriptor
+    header.writeUInt32LE(36 + pcmData.length, 4);
+    // RIFF type
+    header.write("WAVE", 8);
+    // format chunk identifier
+    header.write("fmt ", 12);
+    // format chunk length
+    header.writeUInt32LE(16, 16);
+    // sample format (raw PCM = 1)
+    header.writeUInt16LE(1, 20);
+    // channel count (mono = 1)
+    header.writeUInt16LE(1, 22);
+    // sample rate
+    header.writeUInt32LE(sampleRate, 24);
+    // byte rate (sample rate * block align)
+    header.writeUInt32LE(sampleRate * 2, 28);
+    // block align (channel count * bytes per sample)
+    header.writeUInt16LE(2, 32);
+    // bits per sample
+    header.writeUInt16LE(16, 34);
+    // data chunk identifier
+    header.write("data", 36);
+    // data chunk length
+    header.writeUInt32LE(pcmData.length, 40);
+
+    return Buffer.concat([header, pcmData]);
+  }
+
+  app.get("/api/tts", async (req, res) => {
+    let text = req.query.text as string;
+    if (!text) {
+      res.status(400).send("Text is required");
+      return;
+    }
+    
+    // Clean and normalize the text
+    let cleanedText = text
+      .replace(/[*_#\-`[\]()]/g, '') // Remove markdown and brackets
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!cleanedText) {
+      res.status(400).send("Cleaned text is empty");
+      return;
+    }
+
+    // Truncate to safe length limit
+    if (cleanedText.length > 250) {
+      cleanedText = cleanedText.substring(0, 250);
+    }
+
+    try {
+      console.log(`[TTS] Generating premium fluent speech via gemini-3.1-flash-tts-preview for text: "${cleanedText}"`);
+      
+      const ttsResponse = await ai.models.generateContent({
+        model: "gemini-3.1-flash-tts-preview",
+        contents: [{ parts: [{ text: cleanedText }] }],
+        config: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: "Kore" }, // Core speaker voice
+            },
+          },
+        },
+      });
+
+      const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) {
+        const pcmBuffer = Buffer.from(base64Audio, 'base64');
+        const wavBuffer = encodeWav(pcmBuffer, 24000);
+        
+        console.log(`[TTS] ✅ Successfully generated WAV audio (size: ${wavBuffer.length} bytes)`);
+        res.setHeader("Content-Type", "audio/wav");
+        res.send(wavBuffer);
+        return;
+      } else {
+        throw new Error("No inline audio data block found in Gemini TTS response");
+      }
+    } catch (err: any) {
+      console.warn("[TTS] ⚠️ Primary Gemini TTS failed. Attempting resilient public translate proxy fallbacks...", err?.message || err);
+      
+      // Sanitise more stringently for fallback Google TTS endpoint
+      const safeFallbackText = cleanedText
+        .replace(/[^\w\s\d.,!?;:öÖüÜıİəƏçÇşŞğĞA-Za-zа-яА-ЯёЁ\-\+]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      const fallbackClients = [
+        `https://translate.google.com/translate_tts?ie=UTF-8&tl=az&client=gtx&q=${encodeURIComponent(safeFallbackText)}`,
+        `https://translate.google.com/translate_tts?ie=UTF-8&tl=az&client=tw-ob&total=1&idx=0&textlen=${safeFallbackText.length}&q=${encodeURIComponent(safeFallbackText)}`,
+        `https://translate.google.com/translate_tts?ie=UTF-8&tl=tr&client=gtx&q=${encodeURIComponent(safeFallbackText)}`,
+        `https://translate.google.com/translate_tts?ie=UTF-8&tl=tr&client=tw-ob&total=1&idx=0&textlen=${safeFallbackText.length}&q=${encodeURIComponent(safeFallbackText)}`
+      ];
+
+      for (const url of fallbackClients) {
+        try {
+          const response = await fetch(url, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36',
+              'Referer': 'https://translate.google.com/'
+            }
+          });
+          if (response.ok) {
+            console.log(`[TTS] ✅ Fallback TTS succeeded: ${url}`);
+            res.setHeader("Content-Type", "audio/mpeg");
+            const arrayBuffer = await response.arrayBuffer();
+            res.send(Buffer.from(arrayBuffer));
+            return;
+          }
+        } catch (fetchErr) {
+          console.warn(`[TTS] Fallback attempt failed for URL: ${url}`, fetchErr);
+        }
+      }
+
+      console.error("[TTS] ❌ All TTS methods failed.");
+      res.status(500).send("Speech generation failed across all systems.");
     }
   });
 

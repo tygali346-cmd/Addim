@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { doc, updateDoc } from 'firebase/firestore';
+import { doc, updateDoc, collection, addDoc, onSnapshot, query, orderBy, limit, serverTimestamp } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { triggerToast } from '../lib/toast';
 import { motion, AnimatePresence } from 'motion/react';
@@ -19,7 +19,11 @@ import {
   TrendingUp,
   Sparkles,
   CheckCircle,
-  X
+  X,
+  ThumbsUp,
+  ThumbsDown,
+  Send,
+  MessageSquare
 } from 'lucide-react';
 
 interface LevelDetails {
@@ -73,6 +77,53 @@ export function ProfilePanel() {
   const [verifiedCount, setVerifiedCount] = useState(profile?.verifiedCount || 0);
   const [completedMissions, setCompletedMissions] = useState<string[]>([]);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  // App Feedback system
+  const [appFeedbackList, setAppFeedbackList] = useState<any[]>([]);
+  const [feedbackType, setFeedbackType] = useState<'positive' | 'negative'>('positive');
+  const [feedbackComment, setFeedbackComment] = useState('');
+  const [submittingFeedback, setSubmittingFeedback] = useState(false);
+
+  useEffect(() => {
+    // Listen to real-time app feedbacks (limit to latest 10 to keep it clean)
+    const q = query(
+      collection(db, 'app_feedback'),
+      orderBy('createdAt', 'desc'),
+      limit(10)
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const list: any[] = [];
+      snapshot.forEach((doc) => {
+        list.push({ id: doc.id, ...doc.data() });
+      });
+      setAppFeedbackList(list);
+    }, (error) => {
+      console.error("Failed to load app feedbacks:", error);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleSubmitFeedback = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!feedbackComment.trim()) return;
+    setSubmittingFeedback(true);
+    try {
+      await addDoc(collection(db, 'app_feedback'), {
+        userId: user.uid,
+        userName: profile?.displayName || user.displayName || 'Anonim',
+        type: feedbackType,
+        comment: feedbackComment,
+        createdAt: serverTimestamp()
+      });
+      setFeedbackComment('');
+      triggerToast("Geridönüşünüz uğurla göndərildi! Təşəkkür edirik. 🙌", "success", "Geridönüş");
+    } catch (error) {
+      console.error("Feedback submit error:", error);
+      triggerToast("Geridönüş göndərilərkən xəta baş verdi.", "info", "Xəta");
+    } finally {
+      setSubmittingFeedback(false);
+    }
+  };
 
   useEffect(() => {
     if (profile) {
@@ -555,6 +606,126 @@ export function ProfilePanel() {
               <span className="text-lg">🏆</span>
               Nailiyyət Bədci
             </button>
+          </div>
+        </div>
+
+        {/* Feedback (Geridönüş) Section */}
+        <div className="card border border-teal/15 mt-8 bg-navy-light/60">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-10 h-10 rounded-xl bg-teal/10 border border-teal/30 flex items-center justify-center text-teal shadow-[0_0_15px_rgba(45,212,191,0.1)]">
+              <MessageSquare className="w-5 h-5 animate-pulse" />
+            </div>
+            <div>
+              <h3 className="text-xl font-black italic uppercase tracking-tight text-white">Platforma haqqında Geridönüş (Feedback)</h3>
+              <p className="text-xs text-muted-blue">Platformamıza olan müsbət və ya mənfi rəylərinizi bizimlə bölüşün</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            {/* Feedback Form */}
+            <form onSubmit={handleSubmitFeedback} className="space-y-4">
+              <div className="space-y-2">
+                <label className="label-xs text-muted-blue font-bold tracking-widest uppercase block text-[10px]">Geridönüşün növü</label>
+                <div className="flex gap-4">
+                  <button
+                    type="button"
+                    onClick={() => setFeedbackType('positive')}
+                    className={`flex-1 py-3 px-4 rounded-xl border font-black text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer
+                      ${feedbackType === 'positive' 
+                        ? 'bg-teal/20 border-teal text-teal shadow-[0_0_15px_rgba(45,212,191,0.15)] scale-[1.02]' 
+                        : 'bg-navy-lighter/20 border-white/5 text-muted-blue hover:text-white'}`}
+                  >
+                    <ThumbsUp className="w-4 h-4" /> Müsbət fikir
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFeedbackType('negative')}
+                    className={`flex-1 py-3 px-4 rounded-xl border font-black text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 cursor-pointer
+                      ${feedbackType === 'negative' 
+                        ? 'bg-red-500/20 border-red-500 text-red-500 shadow-[0_0_15px_rgba(239,68,68,0.15)] scale-[1.02]' 
+                        : 'bg-navy-lighter/20 border-white/5 text-muted-blue hover:text-white'}`}
+                  >
+                    <ThumbsDown className="w-4 h-4" /> Mənfi / İrad
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="label-xs text-muted-blue font-bold tracking-widest uppercase block text-[10px]">Sizin şərhləriniz və ya iradlarınız</label>
+                <textarea
+                  value={feedbackComment}
+                  onChange={(e) => setFeedbackComment(e.target.value)}
+                  placeholder={feedbackType === 'positive' 
+                    ? "Tətbiqdə ən çox bəyəndiyiniz xüsusiyyətlər..." 
+                    : "Bizim üçün inkişaf etdirilməsi təklif olunan nöqsanlar..."}
+                  rows={4}
+                  maxLength={1000}
+                  className="input-field-dense w-full resize-none p-4 text-sm bg-navy/60 border border-white/10 rounded-xl text-white outline-none focus:border-teal/50"
+                  required
+                />
+                <div className="text-[10px] text-muted-blue text-right">
+                  {feedbackComment.length}/1000 simvol
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={submittingFeedback || !feedbackComment.trim()}
+                className="btn-primary-dense w-full flex items-center justify-center gap-2 py-3 bg-teal text-navy font-black text-xs uppercase tracking-wider rounded-xl transition-all hover:opacity-90 disabled:opacity-50 cursor-pointer"
+              >
+                {submittingFeedback ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <>
+                    <Send className="w-4 h-4" /> Geridönüşü Göndər
+                  </>
+                )}
+              </button>
+            </form>
+
+            {/* List of Latest Submissions */}
+            <div className="flex flex-col h-full justify-between">
+              <div className="space-y-3">
+                <h4 className="text-[10px] font-black uppercase tracking-widest text-muted-blue flex items-center gap-2">
+                  Son rəylər və geridönüşlər
+                </h4>
+                <div className="space-y-3 max-h-[290px] overflow-y-auto pr-2 scrollbar-thin">
+                  {appFeedbackList.length === 0 ? (
+                    <div className="bg-navy/30 rounded-xl p-8 text-center text-muted-blue border border-white/5">
+                      Hələ heç bir rəy bildirilməyib. İlk rəyi yazan siz olun!
+                    </div>
+                  ) : (
+                    appFeedbackList.map((item) => (
+                      <div 
+                        key={item.id} 
+                        className={`p-4 rounded-xl border flex flex-col gap-2 transition-all ${
+                          item.type === 'positive' 
+                            ? 'bg-teal/5 border-teal/10' 
+                            : 'bg-red-500/5 border-red-500/10'
+                        }`}
+                      >
+                        <div className="flex justify-between items-center">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-black text-white">{item.userName}</span>
+                            <span className={`text-[8px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${
+                              item.type === 'positive' ? 'bg-teal/20 text-teal border border-teal/20' : 'bg-red-500/20 text-red-400 border border-red-500/20'
+                            }`}>
+                              {item.type === 'positive' ? 'Müsbət' : 'Mənfi/İrad'}
+                            </span>
+                          </div>
+                          <span className="text-[9px] text-muted-blue font-mono">
+                            {item.createdAt?.seconds 
+                              ? new Date(item.createdAt.seconds * 1000).toLocaleDateString('az-AZ') 
+                              : 'İndi'}
+                          </span>
+                        </div>
+                        <p className="text-xs text-white-soft leading-relaxed pr-2 whitespace-pre-wrap">{item.comment}</p>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>

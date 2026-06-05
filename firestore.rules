@@ -17,6 +17,31 @@ service cloud.firestore {
              data.uid == request.auth.uid;
     }
 
+    function isValidReview(data) {
+      return data.keys().hasAll(['locationId', 'userId', 'userName', 'rating', 'comment', 'createdAt']) &&
+             data.keys().size() == 6 &&
+             data.locationId is int &&
+             data.userId == request.auth.uid &&
+             data.userName is string &&
+             data.rating is int &&
+             data.rating >= 1 &&
+             data.rating <= 5 &&
+             data.comment is string &&
+             data.comment.size() <= 500 &&
+             data.createdAt == request.time;
+    }
+
+    function isValidFeedback(data) {
+      return data.keys().hasAll(['userId', 'userName', 'type', 'comment', 'createdAt']) &&
+             data.keys().size() == 5 &&
+             data.userId == request.auth.uid &&
+             data.userName is string &&
+             (data.type == 'positive' || data.type == 'negative') &&
+             data.comment is string &&
+             data.comment.size() <= 1000 &&
+             data.createdAt == request.time;
+    }
+
     // Default deny
     match /{document=**} {
       allow read, write: if false;
@@ -38,6 +63,18 @@ service cloud.firestore {
                       request.resource.data.suggestedBy == request.auth.uid;
       allow update, delete: if isSignedIn() && 
                              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    match /location_reviews/{reviewId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidReview(request.resource.data);
+      allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    match /app_feedback/{feedbackId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidFeedback(request.resource.data);
+      allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
     }
   }
 }
