@@ -1,6 +1,16 @@
 {
   "version": 2,
+  "functions": {
+    "api/tts.js": {
+      "maxDuration": 30,
+      "memory": 1024
+    }
+  },
   "rewrites": [
+    {
+      "source": "/api/tts",
+      "destination": "/api/tts.js"
+    },
     {
       "source": "/api/:path*",
       "destination": "/api"

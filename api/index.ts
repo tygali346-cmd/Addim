@@ -19,28 +19,28 @@ const ai = new GoogleGenAI({
 
 // Resilient model fallback chain to avoid free-tier model-specific 429 rate limit issue
 async function generateContentWithFallback(params: { contents: string; config?: any }) {
-  const modelChain = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-flash-latest"];
+  const modelChain = ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"];
   let lastError: any = null;
 
   for (const model of modelChain) {
     let attempts = 2;
     for (let i = 0; i < attempts; i++) {
       try {
-        console.log(`[Vercel-AI] Attempting content generation with model: ${model} (attempt ${i + 1})`);
+        console.log(`[Vercel-AI] Requesting model: ${model} (attempt ${i + 1})`);
         const response = await ai.models.generateContent({
           model,
           contents: params.contents,
           config: params.config,
         });
-        console.log(`[Vercel-AI] ✅ Success using model: ${model}`);
+        console.log(`[Vercel-AI] Ready with model: ${model}`);
         return { response, activeModel: model };
       } catch (err: any) {
-        console.warn(`[Vercel-AI] ⚠️ Model failed or rate-limited: ${model} (attempt ${i + 1}). Error:`, err?.message || err);
+        console.log(`[Vercel-AI] Note: ${model} (attempt ${i + 1}) returned status info: ${err?.message || ''}`);
         lastError = err;
         const errStr = String(err?.message || err || "").toLowerCase();
         const isRateLimitOrTemp = errStr.includes('429') || errStr.includes('503') || errStr.includes('resource_exhausted') || errStr.includes('unavailable');
         if (isRateLimitOrTemp && i < attempts - 1) {
-          console.log(`[Vercel-AI] Retrying ${model} in 300ms due to temporary error...`);
+          console.log(`[Vercel-AI] Re-trying ${model} in 300ms...`);
           await new Promise(res => setTimeout(res, 300));
         } else {
           break; // Proceed to the next model in chain immediately
@@ -118,9 +118,10 @@ Sənin uyğunlaşmalı olduğun 3 dynamic personaj (TONE) var:
 3. "dəstəkləyici" -> İstifadəçi fiziki/psixoloji maneədən, ümidsizlikdən, çətinlikdən şikayətlənəndə, qəmgin və ya yorğun olanda (məsələn: "belə yaşamaq çox çətindir", "hər yer bağlıdır", "mənə heç kim dəstək olmur"). Cavab tonu olduqca empatik, dərindən hiss edən, ürək-dirək verən, həssas və dəstəkləyici olmalıdır.
 
 DANIŞIQ QAYDALARI (MÜTLƏQ ENMƏDƏN ƏMƏL ET):
-- Çox qısa və sadə danış. Cavabın maksimum 2-3 cümlədən ibarət olmalıdır. (MƏQSƏD YALNIZ SƏSLƏNDİRMƏ VƏ RƏVANLIQDIR).
-- Süni, robotik və ya cansız şablon müştəri xidməti ifadələrini ("Əlbəttə!", "Xoş gördük!", "Buyurun, mən sizə kömək etməkdən şadam!") QƏTİYYƏN İSTİFADƏ ETMƏ. Cavaba birbaşa və insani keç.
-- Əgər mətndə qeyri-müəyyənlik varsa, həmişə yönləndirici sual ver ("Şəhərin hansı hissəsində axtarırsınız?", "Dəqiq necə bir köməyə ehtiyacınız var?" və s.)
+- Canlı səsli danışıqda tamamilə təbii, rəvan, son dərəcə axıcı Azərbaycan dilində şifahi danış. Sözləri qətiyyən robot kimi və ya yazılı ədəbi mətn kimi qurma. Bir insanın digər insana deyəcəyi kimi səmimi şifahi ifadələr, təbii bağlayıcılar istifadə et (məsələn: "əlbəttə, kömək edərəm!", "narahat olmayın, birlikdə həll edərik", "çox gözəl", "baş üstə", "gəlin baxaq").
+- Çox qısa və lakonik danış. Cavabın maksimum 2-3 cümlədən ibarət olmalıdır. Bu, səsli səsləndirmənin dərhal və axıcı olması üçün olduqca vacibdir!
+- Süni, robotik və ya cansız şablon ifadələrini ("Əlbəttə!", "Mən sizə kömək etməkdən şadam!") QƏTİYYƏN İSTİFADƏ ETMƏ. Cavaba birbaşa və səmimi keç.
+- Əgər mətndə qeyri-müəyyənlik varsa, həmişə yönləndirici, qısa sual ver ("Şəhərin hansı hissəsində axtarırsınız?", "Dəqiq necə bir köməyə ehtiyacınız var?" və s.)
 
 Yalnız bu strukturu çıxış et:
 [TONE: rəsmi və ya dostyana və ya dəstəkləyici]
@@ -171,6 +172,150 @@ User: ${prompt}`;
   } catch (error: any) {
     console.error("Gemini Vercel API Error:", error);
     res.status(500).json({ error: "Google Gemini xidmətinə qoşularkən xəta baş verdi. Zəhmət olmasa bir qədər sonra yenidən yoxlayın." });
+  }
+});
+
+// Helper to wrap raw 24kHz 16-bit PCM mono audio in a standard 44-byte WAV header for native browser playback
+function encodeWav(pcmData: Buffer, sampleRate: number = 24000): Buffer {
+  const header = Buffer.alloc(44);
+  // RIFF identifier
+  header.write("RIFF", 0);
+  // file length minus RIFF identifier and size descriptor
+  header.writeUInt32LE(36 + pcmData.length, 4);
+  // RIFF type
+  header.write("WAVE", 8);
+  // format chunk identifier
+  header.write("fmt ", 12);
+  // format chunk length
+  header.writeUInt32LE(16, 16);
+  // sample format (raw PCM = 1)
+  header.writeUInt16LE(1, 20);
+  // channel count (mono = 1)
+  header.writeUInt16LE(1, 22);
+  // sample rate
+  header.writeUInt32LE(sampleRate, 24);
+  // byte rate (sample rate * block align)
+  header.writeUInt32LE(sampleRate * 2, 28);
+  // block align (channel count * bytes per sample)
+  header.writeUInt16LE(2, 32);
+  // bits per sample
+  header.writeUInt16LE(16, 34);
+  // data chunk identifier
+  header.write("data", 36);
+  // data chunk length
+  header.writeUInt32LE(pcmData.length, 40);
+
+  return Buffer.concat([header, pcmData]);
+}
+
+app.get("/api/tts", async (req, res) => {
+  let text = req.query.text as string;
+  if (!text) {
+    res.status(400).send("Text is required");
+    return;
+  }
+  
+  // Clean and normalize the text
+  let cleanedText = text
+    .replace(/[*_#\-`[\]()]/g, '') // Remove markdown and brackets
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleanedText) {
+    res.status(400).send("Cleaned text is empty");
+    return;
+  }
+
+  // Truncate to safe length limit
+  if (cleanedText.length > 250) {
+    cleanedText = cleanedText.substring(0, 250);
+  }
+
+  let lastTtsError: any = null;
+  const ttsAttempts = 3;
+  let base64Audio = "";
+
+  for (let attempt = 1; attempt <= ttsAttempts; attempt++) {
+    try {
+      console.log(`[TTS] Generating premium fluent speech via gemini-3.1-flash-tts-preview for text: "${cleanedText}" (attempt ${attempt})`);
+      
+      const ttsResponse = await ai.models.generateContent({
+        model: "gemini-3.1-flash-tts-preview",
+        contents: [{ parts: [{ text: cleanedText }] }],
+        config: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: "Kore" }, // Core speaker voice
+            },
+          },
+        },
+      });
+
+      const audioData = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (audioData) {
+        base64Audio = audioData;
+        break;
+      } else {
+        throw new Error("No inline audio data block found in Gemini TTS response");
+      }
+    } catch (err: any) {
+      console.warn(`[TTS] Attempt ${attempt} failed:`, err?.message || err);
+      lastTtsError = err;
+      if (attempt < ttsAttempts) {
+        await new Promise(res => setTimeout(res, 250));
+      }
+    }
+  }
+
+  try {
+    if (base64Audio) {
+      const pcmBuffer = Buffer.from(base64Audio, 'base64');
+      const wavBuffer = encodeWav(pcmBuffer, 24000);
+      
+      console.log(`[TTS] ✅ Successfully generated WAV audio (size: ${wavBuffer.length} bytes)`);
+      res.setHeader("Content-Type", "audio/wav");
+      res.send(wavBuffer);
+      return;
+    } else {
+      throw lastTtsError || new Error("No base64 audio data generated");
+    }
+  } catch (err: any) {
+    console.warn("[TTS] ⚠️ Primary Gemini TTS failed. Attempting resilient public translate proxy fallbacks...", err?.message || err);
+    
+    // Sanitise more stringently for fallback Google TTS endpoint
+    const safeFallbackText = cleanedText
+      .replace(/[^\w\s\d.,!?;:öÖüÜıİəƏçÇşŞğĞA-Za-zа-яА-ЯёЁ\-\+]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const fallbackClients = [
+      `https://translate.google.com/translate_tts?ie=UTF-8&tl=az&client=gtx&q=${encodeURIComponent(safeFallbackText)}`,
+      `https://translate.google.com/translate_tts?ie=UTF-8&tl=az&client=tw-ob&total=1&idx=0&textlen=${safeFallbackText.length}&q=${encodeURIComponent(safeFallbackText)}`
+    ];
+
+    for (const url of fallbackClients) {
+      try {
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36',
+            'Referer': 'https://translate.google.com/'
+          }
+        });
+        if (response.ok) {
+          console.log(`[TTS] ✅ Fallback TTS succeeded: ${url}`);
+          res.setHeader("Content-Type", "audio/mpeg");
+          const arrayBuffer = await response.arrayBuffer();
+          res.send(Buffer.from(arrayBuffer));
+          return;
+        }
+      } catch (fetchErr) {
+        console.warn(`[TTS] Fallback attempt failed for URL: ${url}`, fetchErr);
+      }
+    }
+
+    console.error("[TTS] ❌ All TTS methods failed.");
+    res.status(500).send("Speech generation failed across all systems.");
   }
 });
 

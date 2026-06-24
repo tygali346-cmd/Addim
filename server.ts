@@ -23,28 +23,28 @@ async function startServer() {
 
   // Helper for resilient fallback content generation to bypass model-specific free-tier quotas (e.g. 429)
   async function generateContentWithFallback(params: { contents: string; config?: any }) {
-    const modelChain = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-flash-latest"];
+    const modelChain = ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"];
     let lastError: any = null;
 
     for (const model of modelChain) {
       let attempts = 2;
       for (let i = 0; i < attempts; i++) {
         try {
-          console.log(`[AI] Attempting content generation with model: ${model} (attempt ${i + 1})`);
+          console.log(`[AI] Requesting model: ${model} (attempt ${i + 1})`);
           const response = await ai.models.generateContent({
             model,
             contents: params.contents,
             config: params.config,
           });
-          console.log(`[AI] ✅ Success using model: ${model}`);
+          console.log(`[AI] Ready with model: ${model}`);
           return { response, activeModel: model };
         } catch (err: any) {
-          console.warn(`[AI] ⚠️ Model failed or rate-limited: ${model} (attempt ${i + 1}). Error:`, err?.message || err);
+          console.log(`[AI] Note: ${model} (attempt ${i + 1}) returned status info: ${err?.message || ''}`);
           lastError = err;
           const errStr = String(err?.message || err || "").toLowerCase();
           const isRateLimitOrTemp = errStr.includes('429') || errStr.includes('503') || errStr.includes('resource_exhausted') || errStr.includes('unavailable');
           if (isRateLimitOrTemp && i < attempts - 1) {
-            console.log(`[AI] Retrying ${model} in 300ms due to temporary error...`);
+            console.log(`[AI] Re-trying ${model} in 300ms...`);
             await new Promise(res => setTimeout(res, 300));
           } else {
             break; // Proceed to the next model in chain immediately
@@ -141,9 +141,10 @@ Sənin uyğunlaşmalı olduğun 3 dynamic personaj (TONE) var:
 3. "dəstəkləyici" -> İstifadəçi fiziki/psixoloji maneədən, ümidsizlikdən, çətinlikdən şikayətlənəndə, qəmgin və ya yorğun olanda (məsələn: "belə yaşamaq çox çətindir", "hər yer bağlıdır", "mənə heç kim dəstək olmur"). Cavab tonu olduqca empatik, dərindən hiss edən, ürək-dirək verən, həssas və dəstəkləyici olmalıdır.
 
 DANIŞIQ QAYDALARI (MÜTLƏQ ENMƏDƏN ƏMƏL ET):
-- Çox qısa və sadə danış. Cavabın maksimum 2-3 cümlədən ibarət olmalıdır. (MƏQSƏD YALNIZ SƏSLƏNDİRMƏ VƏ RƏVANLIQDIR).
-- Süni, robotik və ya cansız şablon müştəri xidməti ifadələrini ("Əlbəttə!", "Xoş gördük!", "Buyurun, mən sizə kömək etməkdən şadam!") QƏTİYYƏN İSTİFADƏ ETMƏ. Cavaba birbaşa və insani keç.
-- Əgər mətndə qeyri-müəyyənlik varsa, həmişə yönləndirici sual ver ("Şəhərin hansı hissəsində axtarırsınız?", "Dəqiq necə bir köməyə ehtiyacınız var?" və s.)
+- Canlı səsli danışıqda tamamilə təbii, rəvan, son dərəcə axıcı Azərbaycan dilində şifahi danış. Sözləri qətiyyən robot kimi və ya yazılı ədəbi mətn kimi qurma. Bir insanın digər insana deyəcəyi kimi səmimi şifahi ifadələr, təbii bağlayıcılar istifadə et (məsələn: "əlbəttə, kömək edərəm!", "narahat olmayın, birlikdə həll edərik", "çox gözəl", "baş üstə", "gəlin baxaq").
+- Çox qısa və lakonik danış. Cavabın maksimum 2-3 cümlədən ibarət olmalıdır. Bu, səsli səsləndirmənin dərhal və axıcı olması üçün olduqca vacibdir!
+- Süni, robotik və ya cansız şablon ifadələrini ("Əlbəttə!", "Mən sizə kömək etməkdən şadam!") QƏTİYYƏN İSTİFADƏ ETMƏ. Cavaba birbaşa və səmimi keç.
+- Əgər mətndə qeyri-müəyyənlik varsa, həmişə yönləndirici, qısa sual ver ("Şəhərin hansı hissəsində axtarırsınız?", "Dəqiq necə bir köməyə ehtiyacınız var?" və s.)
 
 Yalnız bu strukturu çıxış et:
 [TONE: rəsmi və ya dostyana və ya dəstəkləyici]
@@ -253,23 +254,44 @@ User: ${prompt}`;
       cleanedText = cleanedText.substring(0, 250);
     }
 
-    try {
-      console.log(`[TTS] Generating premium fluent speech via gemini-3.1-flash-tts-preview for text: "${cleanedText}"`);
-      
-      const ttsResponse = await ai.models.generateContent({
-        model: "gemini-3.1-flash-tts-preview",
-        contents: [{ parts: [{ text: cleanedText }] }],
-        config: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: "Kore" }, // Core speaker voice
+    let lastTtsError: any = null;
+    const ttsAttempts = 3;
+    let base64Audio = "";
+
+    for (let attempt = 1; attempt <= ttsAttempts; attempt++) {
+      try {
+        console.log(`[TTS] Generating premium fluent speech via gemini-3.1-flash-tts-preview for text: "${cleanedText}" (attempt ${attempt})`);
+        
+        const ttsResponse = await ai.models.generateContent({
+          model: "gemini-3.1-flash-tts-preview",
+          contents: [{ parts: [{ text: cleanedText }] }],
+          config: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: "Kore" }, // Core speaker voice
+              },
             },
           },
-        },
-      });
+        });
 
-      const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        const audioData = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (audioData) {
+          base64Audio = audioData;
+          break;
+        } else {
+          throw new Error("No inline audio data block found in Gemini TTS response");
+        }
+      } catch (err: any) {
+        console.warn(`[TTS] Attempt ${attempt} failed:`, err?.message || err);
+        lastTtsError = err;
+        if (attempt < ttsAttempts) {
+          await new Promise(res => setTimeout(res, 250));
+        }
+      }
+    }
+
+    try {
       if (base64Audio) {
         const pcmBuffer = Buffer.from(base64Audio, 'base64');
         const wavBuffer = encodeWav(pcmBuffer, 24000);
@@ -279,7 +301,7 @@ User: ${prompt}`;
         res.send(wavBuffer);
         return;
       } else {
-        throw new Error("No inline audio data block found in Gemini TTS response");
+        throw lastTtsError || new Error("No base64 audio data generated");
       }
     } catch (err: any) {
       console.warn("[TTS] ⚠️ Primary Gemini TTS failed. Attempting resilient public translate proxy fallbacks...", err?.message || err);
@@ -292,9 +314,7 @@ User: ${prompt}`;
 
       const fallbackClients = [
         `https://translate.google.com/translate_tts?ie=UTF-8&tl=az&client=gtx&q=${encodeURIComponent(safeFallbackText)}`,
-        `https://translate.google.com/translate_tts?ie=UTF-8&tl=az&client=tw-ob&total=1&idx=0&textlen=${safeFallbackText.length}&q=${encodeURIComponent(safeFallbackText)}`,
-        `https://translate.google.com/translate_tts?ie=UTF-8&tl=tr&client=gtx&q=${encodeURIComponent(safeFallbackText)}`,
-        `https://translate.google.com/translate_tts?ie=UTF-8&tl=tr&client=tw-ob&total=1&idx=0&textlen=${safeFallbackText.length}&q=${encodeURIComponent(safeFallbackText)}`
+        `https://translate.google.com/translate_tts?ie=UTF-8&tl=az&client=tw-ob&total=1&idx=0&textlen=${safeFallbackText.length}&q=${encodeURIComponent(safeFallbackText)}`
       ];
 
       for (const url of fallbackClients) {

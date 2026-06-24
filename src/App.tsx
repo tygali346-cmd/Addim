@@ -138,6 +138,8 @@ const customIcon = (color: string) => L.divIcon({
 
 type Panel = 'overview' | 'map' | 'guide' | 'volunteer' | 'jobs' | 'profile';
 
+let isStopped = false;
+
 function AppContent() {
   const [activePanel, setActivePanel] = useState<Panel>('overview');
   const [aiLoading, setAiLoading] = useState(false);
@@ -157,10 +159,13 @@ function AppContent() {
   
   // Continuous Live Voice Call Mode
   const [isLiveVoiceMode, setIsLiveVoiceMode] = useState(false);
+  const isLiveVoiceModeRef = useRef(false);
   const [liveVoiceStatus, setLiveVoiceStatus] = useState<'idle' | 'listening' | 'speaking' | 'thinking'>('idle');
   const [liveTranscript, setLiveTranscript] = useState('');
   const [liveResponse, setLiveResponse] = useState('');
   const liveRecognitionRef = useRef<any>(null);
+  const silenceTimerRef = useRef<any>(null);
+  const lastSpeechTextRef = useRef<string>('');
   
   // High-fidelity natural Azerbaijani speech queue references
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -382,117 +387,104 @@ function AppContent() {
     return chunks.map(c => c.trim()).filter(c => c.length > 0 && /[A-Za-z0-9əƏıİöÖüÜçÇşŞğĞа-яА-Я\d]/.test(c));
   };
 
-  const playNaturalSpeech = (text: string, onStart?: () => void, onEnd?: () => void) => {
-    cancelNaturalSpeech();
+  const speakFullResponse = async (text: string) => {
+    if (isStopped) return; // ƏVVƏLCƏ yoxla
+    if (!text || !text.trim()) return;
+    
+    try {
+      const response = await fetch(`/api/tts?text=${encodeURIComponent(text)}`);
+      if (!response.ok) throw new Error(`TTS xətası: ${response.status}`);
+      
+      const blob = await response.blob();
+      if (isStopped) return;
+      const audioUrl = URL.createObjectURL(blob);
+      const audio = new Audio(audioUrl);
+      
+      currentAudioRef.current = audio;
+      isStopped = false;
+      
+      await audio.play();
+      return new Promise<void>((resolve) => {
+        audio.onended = () => {
+          URL.revokeObjectURL(audioUrl);
+          currentAudioRef.current = null;
+          resolve();
+        };
+        audio.onerror = (e) => {
+          console.error('Audio error:', e);
+          URL.revokeObjectURL(audioUrl);
+          currentAudioRef.current = null;
+          resolve();
+        };
+      });
+    } catch (err) {
+      console.error('speakFullResponse xətası:', err);
+      throw err;
+    }
+  };
 
-    const chunks = splitTextIntoSentenceChunks(text);
-    if (chunks.length === 0) {
+  const playNaturalSpeech = (text: string, onStart?: () => void, onEnd?: () => void) => {
+    isStopped = false;
+    stopAllAudio();
+    isStopped = false;
+
+    if (!text || !text.trim()) {
       if (onEnd) onEnd();
       return;
     }
 
-    currentQueueRef.current = chunks;
-    currentQueueIndexRef.current = 0;
     setIsSpeaking(true);
     if (onStart) onStart();
 
-    const speakWithBrowserSpeechSynthesis = (chunkText: string, onDone: () => void) => {
-      if ('speechSynthesis' in window) {
-        try {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(chunkText);
-          const voices = window.speechSynthesis.getVoices();
-          
-          // Try to locate Azerbaijani or Turkish voice in the browser voices
-          const azVoice = voices.find(v => v.lang.toLowerCase().replace('_', '-').startsWith('az'));
-          const trVoice = voices.find(v => v.lang.toLowerCase().replace('_', '-').startsWith('tr'));
-          
-          if (azVoice) {
-            utterance.voice = azVoice;
-            utterance.lang = 'az-AZ';
-          } else if (trVoice) {
-            utterance.voice = trVoice;
-            utterance.lang = 'tr-TR';
-          } else {
-            utterance.lang = 'az-AZ';
-          }
-          
-          utterance.rate = 1.05;
-          
-          utterance.onend = () => {
-            onDone();
-          };
-          utterance.onerror = (e) => {
-            console.error("Browser speech synthesis error:", e);
-            onDone();
-          };
-          
-          window.speechSynthesis.speak(utterance);
-        } catch (errSync) {
-          console.error("speechSynthesis.speak failed:", errSync);
-          onDone();
-        }
-      } else {
-        onDone();
-      }
-    };
-
-    const playNextChunk = () => {
-      const idx = currentQueueIndexRef.current;
-      if (idx >= currentQueueRef.current.length) {
+    speakFullResponse(text)
+      .then(() => {
         setIsSpeaking(false);
-        currentAudioRef.current = null;
         if (onEnd) onEnd();
-        return;
-      }
-
-      const chunkText = currentQueueRef.current[idx];
-      const audioUrl = `/api/tts?text=${encodeURIComponent(chunkText)}`;
-      
-      const audio = new Audio(audioUrl);
-      currentAudioRef.current = audio;
-
-      audio.onended = () => {
-        currentQueueIndexRef.current += 1;
-        playNextChunk();
-      };
-
-      audio.onerror = (e) => {
-        console.error("Audio playback error for chunk, falling back to browser SpeechSynthesis:", chunkText, e);
-        speakWithBrowserSpeechSynthesis(chunkText, () => {
-          currentQueueIndexRef.current += 1;
-          playNextChunk();
-        });
-      };
-
-      audio.play().catch(err => {
-        console.warn("Audio playback issue, falling back to browser SpeechSynthesis:", err);
-        speakWithBrowserSpeechSynthesis(chunkText, () => {
-          currentQueueIndexRef.current += 1;
-          playNextChunk();
-        });
+      })
+      .catch((err) => {
+        console.error("playNaturalSpeech error:", err);
+        setIsSpeaking(false);
+        if (onEnd) onEnd();
       });
-    };
-
-    playNextChunk();
   };
 
-  const cancelNaturalSpeech = () => {
+  const stopAllAudio = () => {
+    isStopped = true;
+    
+    // Cari audio elementi dayandır
     if (currentAudioRef.current) {
       try {
+        currentAudioRef.current.onended = null;
+        currentAudioRef.current.onerror = null;
+        currentAudioRef.current.onpause = null;
         currentAudioRef.current.pause();
-        currentAudioRef.current.src = '';
-      } catch (e) {}
+        currentAudioRef.current.currentTime = 0;
+        currentAudioRef.current.removeAttribute('src');
+        currentAudioRef.current.load();
+      } catch (e) { console.error('Audio stop xətası:', e); }
       currentAudioRef.current = null;
     }
-    if ('speechSynthesis' in window) {
+    
+    // Bütün queue-ları təmizlə
+    currentQueueRef.current = [];
+    currentQueueIndexRef.current = 0;
+    
+    // Browser TTS-i zorla dayandır (əgər istifadə olunursa)
+    if ("speechSynthesis" in window) {
       try {
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.pause();
+        window.speechSynthesis.resume();
         window.speechSynthesis.cancel();
       } catch (e) {}
     }
-    currentQueueRef.current = [];
-    currentQueueIndexRef.current = 0;
+    
+    // State-i idle et
     setIsSpeaking(false);
+  };
+
+  const cancelNaturalSpeech = () => {
+    stopAllAudio();
   };
 
   const speakResponseText = (text: string) => {
@@ -504,6 +496,7 @@ function AppContent() {
   };
 
   const stopLiveVoiceMode = () => {
+    isLiveVoiceModeRef.current = false;
     setIsLiveVoiceMode(false);
     setLiveVoiceStatus('idle');
     if (liveRecognitionRef.current) {
@@ -512,12 +505,17 @@ function AppContent() {
         liveRecognitionRef.current.onresult = null;
         liveRecognitionRef.current.onerror = null;
         liveRecognitionRef.current.onend = null;
-        liveRecognitionRef.current.stop();
+        liveRecognitionRef.current.abort(); // stop() əvəzinə abort()
       } catch (e) {
         console.error("Error stopping live recognition:", e);
       }
       liveRecognitionRef.current = null;
     }
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    lastSpeechTextRef.current = '';
     cancelNaturalSpeech();
     triggerToast("Canlı səsli söhbət rejimi dayandırıldı.", "info", "Səsli Rejim");
   };
@@ -529,6 +527,7 @@ function AppContent() {
       return;
     }
 
+    isLiveVoiceModeRef.current = true;
     setIsLiveVoiceMode(true);
     setLiveVoiceStatus('listening');
     setLiveTranscript('');
@@ -539,9 +538,17 @@ function AppContent() {
     playNaturalSpeech(
       "Canlı səsli söhbət aktivdir. Sizi dinləyirəm, buyurun danışın.",
       () => {
+        if (!isLiveVoiceModeRef.current) {
+          cancelNaturalSpeech();
+          return;
+        }
         setLiveVoiceStatus('speaking');
       },
       () => {
+        if (!isLiveVoiceModeRef.current) {
+          cancelNaturalSpeech();
+          return;
+        }
         setLiveVoiceStatus('listening');
         runLiveRecognitionLoop(true);
       }
@@ -549,6 +556,7 @@ function AppContent() {
   };
 
   const runLiveRecognitionLoop = (forceRestart: boolean = false) => {
+    if (!isLiveVoiceModeRef.current) return;
     if (liveVoiceStatus === 'speaking' || liveVoiceStatus === 'thinking') {
       if (!forceRestart) return;
     }
@@ -563,49 +571,97 @@ function AppContent() {
       } catch (e) {}
     }
 
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    lastSpeechTextRef.current = '';
+
     const recognition = new SpeechRecognition();
     recognition.continuous = false;
     recognition.interimResults = true;
     recognition.lang = 'az-AZ';
 
     recognition.onstart = () => {
+      if (!isLiveVoiceModeRef.current) {
+        try { recognition.stop(); } catch(e) {}
+        return;
+      }
       setLiveVoiceStatus('listening');
     };
 
     recognition.onresult = (event: any) => {
-      let finalTranscript = '';
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) {
-          finalTranscript += event.results[i][0].transcript;
-        } else {
-          const interim = event.results[i][0].transcript;
-          setLiveTranscript(interim);
-        }
+      if (!isLiveVoiceModeRef.current) {
+        try { recognition.stop(); } catch(e) {}
+        return;
       }
-      if (finalTranscript.trim()) {
-        setLiveTranscript(finalTranscript);
-        recognition.onend = null;
-        recognition.stop();
-        handleLiveAIQuery(finalTranscript);
+      let fullText = '';
+      for (let i = 0; i < event.results.length; ++i) {
+        fullText += event.results[i][0].transcript;
+      }
+
+      const activeText = fullText.trim();
+      if (activeText) {
+        setLiveTranscript(activeText);
+        lastSpeechTextRef.current = activeText;
+
+        // Clear existing silence timer
+        if (silenceTimerRef.current) {
+          clearTimeout(silenceTimerRef.current);
+        }
+
+        // Set 1.8 seconds silence detection timer for ultra-fast response
+        silenceTimerRef.current = setTimeout(() => {
+          if (!isLiveVoiceModeRef.current) return;
+          if (lastSpeechTextRef.current.trim()) {
+            const queryText = lastSpeechTextRef.current.trim();
+            lastSpeechTextRef.current = '';
+            if (silenceTimerRef.current) {
+              clearTimeout(silenceTimerRef.current);
+              silenceTimerRef.current = null;
+            }
+            recognition.onend = null;
+            try {
+              recognition.stop();
+            } catch (e) {}
+            handleLiveAIQuery(queryText);
+          }
+        }, 1800);
       }
     };
 
     recognition.onerror = (event: any) => {
       console.warn("Live Speech recognition error:", event.error);
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
+      if (!isLiveVoiceModeRef.current) return;
       if (event.error === 'no-speech') {
         setTimeout(() => {
-          runLiveRecognitionLoop();
+          if (isLiveVoiceModeRef.current) {
+            runLiveRecognitionLoop();
+          }
         }, 1000);
       } else {
         setTimeout(() => {
-          runLiveRecognitionLoop();
+          if (isLiveVoiceModeRef.current) {
+            runLiveRecognitionLoop();
+          }
         }, 2000);
       }
     };
 
     recognition.onend = () => {
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
+      if (!isLiveVoiceModeRef.current) return;
       setTimeout(() => {
-        runLiveRecognitionLoop();
+        if (isLiveVoiceModeRef.current) {
+          runLiveRecognitionLoop();
+        }
       }, 500);
     };
 
@@ -618,6 +674,7 @@ function AppContent() {
   };
 
   const handleLiveAIQuery = async (userSpeech: string) => {
+    if (!isLiveVoiceModeRef.current) return;
     setLiveVoiceStatus('thinking');
     setLiveResponse('Düşünürəm...');
 
@@ -632,6 +689,7 @@ function AppContent() {
 
     try {
       const data = await askGemini(userSpeech, contextMap[activePanel as keyof typeof contextMap] || "Canlı səsli söhbət rejimi.");
+      if (!isLiveVoiceModeRef.current) return;
       setLiveResponse(data.text);
       setAiTone(data.tone);
       setDetectedMood(data.mood);
@@ -640,6 +698,7 @@ function AppContent() {
       speakLiveResponse(data.text);
     } catch (error) {
       console.error("Live AI Ask Error:", error);
+      if (!isLiveVoiceModeRef.current) return;
       const errTxt = "Zəhmət olmasa yenidən söyləyin, xəta baş verdi.";
       setLiveResponse(errTxt);
       setLiveVoiceStatus('speaking');
@@ -648,17 +707,28 @@ function AppContent() {
   };
 
   const speakLiveResponse = (responseTxt: string) => {
+    if (!isLiveVoiceModeRef.current) return;
     setLiveVoiceStatus('speaking');
     playNaturalSpeech(
       responseTxt,
       () => {
+        if (!isLiveVoiceModeRef.current) {
+          cancelNaturalSpeech();
+          return;
+        }
         setLiveVoiceStatus('speaking');
       },
       () => {
+        if (!isLiveVoiceModeRef.current) {
+          cancelNaturalSpeech();
+          return;
+        }
         setLiveTranscript('');
         setLiveVoiceStatus('listening');
         setTimeout(() => {
-          runLiveRecognitionLoop(true);
+          if (isLiveVoiceModeRef.current) {
+            runLiveRecognitionLoop(true);
+          }
         }, 400);
       }
     );
@@ -672,8 +742,11 @@ function AppContent() {
           liveRecognitionRef.current.onresult = null;
           liveRecognitionRef.current.onerror = null;
           liveRecognitionRef.current.onend = null;
-          liveRecognitionRef.current.stop();
+          liveRecognitionRef.current.abort(); // stop() əvəzinə abort()
         } catch (e) {}
+      }
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
       }
       cancelNaturalSpeech();
     };
